@@ -12,10 +12,13 @@
   <script type="module" src="./app.js"></script>
 </head>
 <body>
-  <div id="wallpaper" data-source="demo" aria-hidden="true"></div>
+  <div id="wallpaper" aria-hidden="true"></div>
   <div id="app" class="shell">
     <div class="topbar" id="topbar">
-      <div id="window-chrome" hidden data-tauri-drag-region="deep"></div>
+      <div class="topbar-window" data-tauri-drag-region="deep">
+        <div id="window-chrome" hidden data-tauri-drag-region="deep"></div>
+        <div id="rail-toggle-slot"></div>
+      </div>
       <header class="chrome" id="chrome" data-tauri-drag-region="deep"></header>
     </div>
     <div class="c-topveil" id="topveil" data-on="0" aria-hidden="true"></div>
@@ -28,8 +31,6 @@
   <dialog id="commands" class="command-dialog" aria-labelledby="commands-title"></dialog>
   <dialog id="modal" class="dialog" aria-labelledby="dialog-title"></dialog>
   <div id="pop" class="popover c-menu" hidden></div>
-  <!-- 壁纸接线：普通 script，不是 module；宿主在时把窗口背后的桌面截进来。 -->
-  <script src="./wallpaper.js"></script>
   <div id="toasts" class="toasts" aria-live="polite"></div>
   <div id="glass-defs" aria-hidden="true"></div>
 </body>

@@ -205,6 +205,13 @@
   --s-10: 32px;
   --s-11: 40px;
 
+  /* 顶栏的横向节奏。放在 :root，而不是只挂在 .l-app 上：
+     宿主可以自己装外壳（Vaulta 就是），不该因为没套 AppShell 就丢掉
+     「红绿灯↔开关↔标题组↔胶囊」的同一套 16px 间距。 */
+  --topbar-pad-l: var(--s-7);   /* 16 */
+  --topbar-pad-r: var(--s-6);   /* 12 */
+  --topbar-gap: var(--s-7);     /* 16 */
+
   /* ---------------------------------------------------------------------
      8. 圆角（Golden Gate 统一圆角标准）
      --------------------------------------------------------------------- */
@@ -894,11 +901,8 @@ html[data-shell="host"] .l-app {
    曾经的做法是给顶栏算一个 padding-left = 红绿灯 + 开关 + 间距：
    那是把布局写成了算术，开关一隐藏，算出来的位置就过期了。 */
 .l-app {
-  --topbar-pad-l: var(--s-7);   /* 16 */
-  --topbar-pad-r: var(--s-6);   /* 12 */
-  /* 唯一的横向节奏：红绿灯↔开关、开关↔标题组、胶囊↔胶囊，全是它。
-     要松要紧只改这一个数，四处一起动。 */
-  --topbar-gap: var(--s-7);     /* 16 */
+  /* --topbar-pad-l / --topbar-pad-r / --topbar-gap 定义在 tokens.css 的
+     :root 上：宿主不套 .l-app 也要拿到同一套横向节奏。 */
   /* 都是推出来的，不写死：改 --tl-dot / --tl-gap / --capsule-h 会自动跟上 */
   --chrome-lights-w: calc(3 * var(--tl-dot) + 2 * var(--tl-gap));
   --chrome-btn-w: var(--capsule-h);

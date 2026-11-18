@@ -173,14 +173,15 @@ async function goHistory(delta) {
   finally { viewHistory.lock = false; paintNavPair(); }
 }
 function renderChromeInto() {
+  if (!$('#rail-toggle')) redraw($('#rail-toggle-slot'), capsule('<div id="rail-toggle"></div>', 'chrome-round', 'round'));
   if (!$('#search-form')) {
-    const shell = `<div class="brand-slot">${capsule('<div id="rail-toggle"></div>', 'chrome-round', 'round')}<div class="brand" aria-label="vaulta" data-tauri-drag-region="deep"><img src="./assets/vaulta.png" alt=""><span>vaulta</span></div></div>
-      <div class="chrome-main"><div class="chrome-lead"><div id="navpair-slot"></div><div class="vault-loc"></div></div>
+    const shell = `<div class="chrome-main">
+      <div class="chrome-lead"><div id="navpair-slot"></div>${capsule('<div class="vault-loc"></div>', 'vault-glass')}</div>
       ${capsule('<form class="searchbar" id="search-form" role="search"><span id="query-slot"></span><kbd title="聚焦搜索">Ctrl K</kbd><div id="query-scope"></div></form>', 'search-glass')}
       ${capsule('<div class="chrome-actions"></div>', 'actions-glass')}</div>`;
     redraw(chrome, widget('toolbar', {}, { fallback: shell, tag: 'div', className: 'vaulta-toolbar' }));
-    // The brand and the gaps in the capsule row are the drag region; the search
-    // field and every capsule control stay clickable.
+    // The empty parts of the topbar are the drag region; the search field and
+    // every capsule control stay clickable.
     chrome.querySelector('.c-topbar')?.removeAttribute('data-tauri-drag-region');
   }
   redraw($('#rail-toggle'), ib(S.rail ? '隐藏侧栏' : '显示侧栏', 'toggle-rail', 'panel-left', { attrs: `aria-expanded="${S.rail}"` }));
@@ -254,7 +255,8 @@ function navLink(page, label, symbol, value = page, options = {}) {
 function renderRail() {
   const hasVaults = !!S.registry.length;
   const inbox = snap().assets.filter(a => a.state === 'inbox').length;
-  return `<nav class="rail-scroll c-nav" id="rail-scroll" aria-label="主要导航"><section class="rail-section lead"><div class="rail-label">浏览</div>
+  return `<div class="rail-brand" aria-label="vaulta"><img src="./assets/vaulta.png" alt=""><span>vaulta</span></div>
+    <nav class="rail-scroll c-nav" id="rail-scroll" aria-label="主要导航"><section class="rail-section lead"><div class="rail-label">浏览</div>
     ${navLink('home', '仓库', 'house')}${hasVaults ? `${navLink('physical', '文件', 'folder-tree', 'physical', { active: S.page === 'physical' })}${navLink('all', '资料库', 'bookmark', 'all', { active: libraryPages.has(S.page) && !['physical', 'history'].includes(S.page) })}` : ''}</section>
     ${hasVaults ? `<section class="rail-section"><div class="rail-label">待办</div>${navLink('inbox', '收件箱', 'inbox', 'inbox', { count: inbox })}${navLink('marking', '待标记', 'flag', 'marking', { count: S.registry.every(v => S.cache.has(v.id) && !S.markingErrors.has(v.id)) ? pendingMarks : 0 })}</section>` : ''}</nav>
     <div class="rail-bottom">${navLink('settings', '设置', 'settings')}<div class="local-note">${icon('shield', 14)}<span>仅本机</span></div></div>`;

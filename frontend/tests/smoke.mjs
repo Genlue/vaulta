@@ -127,10 +127,14 @@ try {
   await wait(exists('.c-statusbar')); await wait(exists('.c-nav__item')); await wait(exists('.c-search input'));
   await wait(text('还没有仓库')); await wait(text('工作区就绪')); await wait(exists('#glass-defs svg'));
   await wait(exists('#chrome [data-gd-widget=toolbar][data-gd-mounted] .c-topbar'));
-  assert.ok(await get(`document.querySelectorAll('#chrome [data-gd-widget=capsule][data-gd-mounted] .c-capsule').length >= 3`));
+  assert.ok(await get(`document.querySelectorAll('#chrome [data-gd-widget=capsule][data-gd-mounted] .c-capsule').length >= 4`));
+  // Brand moved into the rail's second row; the capsule row only holds controls.
+  assert.ok(await get(`!!document.querySelector('.rail-brand img') && !document.querySelector('.brand-slot')`));
+  assert.ok(await get(`!!document.querySelector('.vault-glass > .c-capsule')`));
+  assert.equal(await get(`getComputedStyle(document.querySelector('.chrome-main')).columnGap`), '16px');
   assert.equal(await get(`getComputedStyle(document.querySelector('.chrome')).backgroundColor`), 'rgba(0, 0, 0, 0)');
   assert.ok(await get(`!!document.querySelector('#topveil.c-topveil')`));
-  const optic = await get(`getComputedStyle(document.querySelector('#chrome .c-capsule--round')).backdropFilter`);
+  const optic = await get(`getComputedStyle(document.querySelector('#rail-toggle-slot .c-capsule--round')).backdropFilter`);
   assert.match(optic, /blur.*saturate/);
   if (await get(`CSS.supports('backdrop-filter','url(#gd-glass-capsule-34)')`)) assert.match(optic, /gd-glass-capsule-34/);
   await shot('01-home');
@@ -247,6 +251,9 @@ try {
   await get(`document.querySelector('#stage').scrollTop=480`); await pause(320);
   assert.equal(await get(`getComputedStyle(document.querySelector('#topveil')).opacity`), '1');
   assert.equal(await get(`getComputedStyle(document.querySelector('.asset-stage')).paddingLeft`), '0px');
+  // The stage is full-bleed, but its content keeps the shared inner gutter.
+  assert.ok(parseFloat(await get(`getComputedStyle(document.querySelector('.asset-intro')).paddingLeft`)) >= 16);
+  assert.ok(parseFloat(await get(`getComputedStyle(document.querySelector('.asset-toolbar')).paddingLeft`)) >= 16);
   assert.deepEqual(await get(`(()=>{const stage=document.querySelector('#stage'), th=document.querySelector('thead th'), r=th.getBoundingClientRect(), s=stage.getBoundingClientRect(); const rowPoint=document.elementFromPoint(r.left+45, r.bottom+4); return {gap:r.top-s.top, head:!!document.elementFromPoint(r.left+8,r.top+6)?.closest('thead'), row:!!rowPoint?.closest('tbody tr'), noOverflow:stage.scrollWidth===stage.clientWidth}})()`), { gap: 52, head: true, row: true, noOverflow: true });
   await shot('07-compact-sticky');
   const startGrip = await get(`(()=>{const rail=document.querySelector('#rail'), grip=document.querySelector('#rail-grip [role=separator]'), a=grip.getBoundingClientRect();return {x:Math.round(a.left+a.width/2),y:Math.round(a.top+a.height/2),width:rail.offsetWidth};})()`);

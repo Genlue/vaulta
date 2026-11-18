@@ -143,7 +143,7 @@ try {
   const start = await get(`(() => {
     window.testTrafficLights = ${lights};
     const lights = ${lights}.getBoundingClientRect();
-    const toggle = document.querySelector('.brand-slot .c-capsule')?.getBoundingClientRect();
+    const toggle = document.querySelector('#rail-toggle-slot .c-capsule')?.getBoundingClientRect();
     const app = document.querySelector('#app').getBoundingClientRect();
     const center = r => (r.top + r.bottom) / 2;
     return { sameRow: !!toggle && Math.abs(center(lights) - center(toggle)) < 1,
@@ -160,26 +160,30 @@ try {
 
   // A single press routes through Tauri's drag path. CDP doesn't move the
   // system cursor, so this tests hit targeting and IPC authorization, not distance.
-  const drag = `document.querySelector('.brand[data-tauri-drag-region]')`;
+  const drag = `document.querySelector('.topbar-window')`;
   assert.equal(await get(`(() => {
     const target = ${drag};
     const box = target.getBoundingClientRect();
-    const hit = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+    // The right end of the rail column is empty: lights and the toggle end earlier.
+    const hit = document.elementFromPoint(box.right - 6, box.y + box.height / 2);
     const event = new MouseEvent('mousedown', {button: 0, detail: 1, bubbles: true, composed: true, cancelable: true});
-    return !!hit?.closest('.brand') && !hit.dispatchEvent(event);
+    return !!hit?.closest('.topbar-window') && !hit.closest('button') && !hit.dispatchEvent(event);
   })()`), true);
   await get(`__TAURI__.core.invoke('plugin:window|start_dragging')`);
   await get(`${drag}.dispatchEvent(new MouseEvent('mousedown', {button: 0, detail: 2, bubbles: true, composed: true, cancelable: true}))`);
   await wait(`(async () => (await ${ipcState}).maximized && ${light('zoom')}.title === '还原')()`);
   await get(`${light('zoom')}.click()`);
   await wait(`(async () => !(await ${ipcState}).maximized)()`);
-  // IsZoomed flips before the restore animation ends; a minimize issued during
-  // that animation is ignored by the shell, so let the window settle first.
-  await sleep(450);
   // Capture the integrated settings page, not an isolated component preview.
   const screenshot = await cdp('Page.captureScreenshot', { format: 'png' });
   await writeFile(join(temp, 'traffic-lights.png'), Buffer.from(screenshot.data, 'base64'));
-  await get(`${light('min')}.click()`);
+  // IsZoomed flips before the restore animation ends, and the shell ignores a
+  // minimize issued during that animation. Press, check, and press again.
+  for (let attempt = 0; attempt < 6; attempt++) {
+    await get(`${light('min')}.click()`);
+    await sleep(220);
+    if (await get(`(async () => (await ${ipcState}).minimized)()`)) break;
+  }
   await wait(`(async () => (await ${ipcState}).minimized)()`);
   assert.deepEqual(running.errors, []);
   await running.stop();
