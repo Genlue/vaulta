@@ -14,6 +14,7 @@ Push-Location $root
 try {
     $confPath = Join-Path $root 'src-tauri/tauri.conf.json'
     $cargoPath = Join-Path $root 'src-tauri/Cargo.toml'
+    $lockPath = Join-Path $root 'Cargo.lock'
     $current = (Get-Content -LiteralPath $confPath -Raw | ConvertFrom-Json).version
 
     # Every packaged build gets its own patch version. Pass -Version to set one
@@ -31,31 +32,51 @@ try {
         throw "Invalid version '$Version'. Expected major.minor.patch."
     }
 
-    if ($Version -ne $current) {
-        # Replace only the version fields; keep the rest of each file byte-for-byte.
-        $utf8 = [System.Text.UTF8Encoding]::new($false)
-        $conf = Get-Content -LiteralPath $confPath -Raw
-        $conf = [regex]::Replace($conf, '"version"\s*:\s*"' + [regex]::Escape($current) + '"', '"version": "' + $Version + '"', 1)
-        [System.IO.File]::WriteAllText($confPath, $conf, $utf8)
-        $cargo = Get-Content -LiteralPath $cargoPath -Raw
-        $cargo = [regex]::Replace($cargo, '(?m)^version\s*=\s*"' + [regex]::Escape($current) + '"', 'version = "' + $Version + '"', 1)
-        [System.IO.File]::WriteAllText($cargoPath, $cargo, $utf8)
-        # Refresh the workspace lock entry before the --locked build.
-        cargo check -p vaulta --offline | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw 'Failed to refresh Cargo.lock after the version bump.' }
-        Write-Host "Version: $current -> $Version"
-    } else {
-        Write-Host "Version: $Version (unchanged)"
+    $changed = $Version -ne $current
+    $saved = @{}
+    if ($changed) {
+        # Keep byte-for-byte copies so a failed build does not consume a version.
+        $saved = @{
+            Conf = Get-Content -LiteralPath $confPath -Raw
+            Cargo = Get-Content -LiteralPath $cargoPath -Raw
+            Lock = Get-Content -LiteralPath $lockPath -Raw
+        }
     }
 
-    $priorOffline = $env:CARGO_NET_OFFLINE
-    if ($Offline) { $env:CARGO_NET_OFFLINE = 'true' }
     try {
-        cargo tauri build --ci --no-sign -- --locked
-        if ($LASTEXITCODE -ne 0) { throw 'Vaulta build failed.' }
-    } finally {
-        $env:CARGO_NET_OFFLINE = $priorOffline
+        if ($changed) {
+            $utf8 = [System.Text.UTF8Encoding]::new($false)
+            $conf = [regex]::Replace($saved.Conf, '"version"\s*:\s*"' + [regex]::Escape($current) + '"', '"version": "' + $Version + '"', 1)
+            [System.IO.File]::WriteAllText($confPath, $conf, $utf8)
+            $cargo = [regex]::Replace($saved.Cargo, '(?m)^version\s*=\s*"' + [regex]::Escape($current) + '"', 'version = "' + $Version + '"', 1)
+            [System.IO.File]::WriteAllText($cargoPath, $cargo, $utf8)
+            # Refresh the workspace lock entry before the --locked build.
+            cargo check -p vaulta --offline | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to refresh Cargo.lock after the version bump.' }
+            Write-Host "Version: $current -> $Version"
+        } else {
+            Write-Host "Version: $Version (unchanged)"
+        }
+
+        $priorOffline = $env:CARGO_NET_OFFLINE
+        if ($Offline) { $env:CARGO_NET_OFFLINE = 'true' }
+        try {
+            cargo tauri build --ci --no-sign -- --locked
+            if ($LASTEXITCODE -ne 0) { throw 'Vaulta build failed.' }
+        } finally {
+            $env:CARGO_NET_OFFLINE = $priorOffline
+        }
+    } catch {
+        if ($changed) {
+            $utf8 = [System.Text.UTF8Encoding]::new($false)
+            [System.IO.File]::WriteAllText($confPath, $saved.Conf, $utf8)
+            [System.IO.File]::WriteAllText($cargoPath, $saved.Cargo, $utf8)
+            [System.IO.File]::WriteAllText($lockPath, $saved.Lock, $utf8)
+            Write-Warning "Build failed; restored version $current."
+        }
+        throw
     }
+
     $dist = Join-Path $root 'dist'
     $portableName = "vaulta-$Version-windows-x64"
     $portable = Join-Path $dist $portableName
@@ -65,6 +86,9 @@ try {
     }
     Get-ChildItem -LiteralPath (Join-Path $root 'target/release/bundle/nsis') -Filter "vaulta_${Version}_*-setup.exe" -File |
         ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $dist }
-    Compress-Archive -LiteralPath $portable -DestinationPath (Join-Path $dist "$portableName.zip") -Force
+    # ZipFile writes no progress records, so CI logs stay free of archive chatter.
+    $zip = Join-Path $dist "$portableName.zip"
+    if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
+    [System.IO.Compression.ZipFile]::CreateFromDirectory($portable, $zip, [System.IO.Compression.CompressionLevel]::Optimal, $true)
     Write-Host "Vaulta $Version artifacts: $dist"
 } finally { Pop-Location }
