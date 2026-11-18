@@ -1289,6 +1289,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "glass-design-host"
+version = "0.8.3"
+dependencies = [
+ "base64 0.22.1",
+ "png",
+ "serde",
+ "serde_json",
+ "tauri",
+ "windows",
+]
+
+[[package]]
 name = "glib"
 version = "0.18.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4365,6 +4377,7 @@ version = "0.3.4"
 dependencies = [
  "anyhow",
  "dirs 6.0.0",
+ "glass-design-host",
  "notify",
  "serde",
  "serde_json",

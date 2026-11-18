@@ -173,6 +173,9 @@ try {
   await wait(`(async () => (await ${ipcState}).maximized && ${light('zoom')}.title === '还原')()`);
   await get(`${light('zoom')}.click()`);
   await wait(`(async () => !(await ${ipcState}).maximized)()`);
+  // IsZoomed flips before the restore animation ends; a minimize issued during
+  // that animation is ignored by the shell, so let the window settle first.
+  await sleep(450);
   // Capture the integrated settings page, not an isolated component preview.
   const screenshot = await cdp('Page.captureScreenshot', { format: 'png' });
   await writeFile(join(temp, 'traffic-lights.png'), Buffer.from(screenshot.data, 'base64'));

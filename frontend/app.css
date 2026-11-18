@@ -78,7 +78,10 @@ button:focus-visible, summary:focus-visible, select:focus-visible, input:focus-v
 .ic-btn { display: inline-grid; flex: 0 0 auto; place-items: center; width: 28px; height: 28px; border-radius: var(--r-xs); color: var(--muted); }
 .ic-btn.soft, .ic-btn.on { color: var(--accent-fg); background: var(--soft-accent); }
 .toolbar-round { border-radius: 50%; }
-.rail { grid-area: 1/1; padding-top: var(--toolbar-h); background: var(--side); box-shadow: inset -0.5px 0 0 var(--line); display: flex; flex-direction: column; min-height: 0; }
+/* 侧栏是玻璃柱，不是实心窗格：它背后就是 #wallpaper 的桌面采样。
+   配比照 GlassDesign 画廊（浅色 78% / 深色 62%），文字对比度不受影响。 */
+.rail { grid-area: 1/1; padding-top: var(--toolbar-h); background: color-mix(in srgb, var(--side) 78%, transparent); -webkit-backdrop-filter: blur(var(--m-panel-blur)) saturate(1.5); backdrop-filter: blur(var(--m-panel-blur)) saturate(1.5); box-shadow: inset -0.5px 0 0 var(--line); display: flex; flex-direction: column; min-height: 0; }
+[data-theme='dark'] .rail { background: color-mix(in srgb, var(--side) 62%, transparent); }
 .rail-scroll { flex: 1; min-height: 0; overflow: auto; padding: 16px 10px 8px; scrollbar-width: thin; }
 .rail-section { padding: 0 0 16px; }
 .rail-label { min-height: 26px; display: flex; justify-content: space-between; align-items: center; margin: 0 9px 4px; font-size: 11px; font-weight: 500; letter-spacing: .08em; color: var(--quiet); }
@@ -88,12 +91,12 @@ button:focus-visible, summary:focus-visible, select:focus-visible, input:focus-v
 .nav-link.active { background: var(--selected); color: var(--accent-fg); font-weight: 500; }
 .nav-link.active::before { content: ''; position: absolute; left: -3px; width: 3px; height: 16px; background: var(--accent); border-radius: var(--r-sm); }
 .nav-count { background: var(--soft-accent); color: var(--accent-fg); border-radius: var(--r-xs); font-size: 11px; font-weight: 500; padding: 1px 6px; }
-.rail-bottom { padding: 8px 10px 12px; background: var(--side); border-top: 0.5px solid var(--line); }
+.rail-bottom { padding: 8px 10px 12px; background: transparent; border-top: 0.5px solid var(--line); }
 .local-note { margin: 10px 10px 0; display: flex; align-items: center; gap: 7px; color: var(--quiet); font-size: 11px; }
 .shell.rail-hidden { --rail-width: 0px; }
 .rail-hidden .rail { visibility: hidden; }
 .rail-hidden .brand-slot { width: auto; }
-.workspace { grid-area: 1/2; min-height: 0; min-width: 0; background: var(--canvas); container-type: inline-size; }
+.workspace { grid-area: 1/2; min-height: 0; min-width: 0; background: color-mix(in srgb, var(--canvas) 94%, transparent); container-type: inline-size; }
 .stage { height: 100%; overflow: auto; scrollbar-width: thin; padding-top: var(--toolbar-h); }
 .status { grid-area: 2/1/3/-1; display: block; min-width: 0; }
 .status-left { min-width: 0; display: flex; align-items: center; flex: 0 1 auto; gap: 7px; }
@@ -181,13 +184,13 @@ button:focus-visible, summary:focus-visible, select:focus-visible, input:focus-v
 .bulk-band .c-btn { color: var(--accent-fg); background: var(--paper); height: 28px; }
 .bulk-band .c-btn:hover { background: var(--hover); }
 input[type=checkbox] { appearance: auto; accent-color: var(--accent-fg); width: 14px; height: 14px; margin: 0; vertical-align: middle; flex: 0 0 auto; }
-.asset-table { width: 100%; border: 0.5px solid var(--line); border-spacing: 0; table-layout: fixed; border-radius: var(--r-md); overflow: clip; background: var(--paper); }
+.asset-table { width: 100%; border: 0.5px solid var(--line); border-spacing: 0; table-layout: fixed; border-radius: var(--r-md); overflow: clip; background: color-mix(in srgb, var(--paper) 90%, transparent); }
 .asset-table th.col-check { width: 34px; }
 .asset-table th.col-state { width: 76px; }
 .asset-table th.col-size { width: 70px; }
 .asset-table th.col-date { width: 99px; }
 .asset-table th.col-more { width: 36px; }
-.asset-table th { text-align: start; height: 36px; font-size: 11px; font-weight: 500; color: var(--muted); background: var(--side); }
+.asset-table th { text-align: start; height: 36px; font-size: 11px; font-weight: 500; color: var(--muted); background: color-mix(in srgb, var(--side) 92%, transparent); }
 .asset-table th button { display: inline-flex; align-items: center; gap: 4px; border-radius: var(--r-xs); }
 .asset-table th button:hover { color: var(--accent-fg); }
 .asset-table td, .asset-table th { border-bottom: 0.5px solid var(--line); padding: 0 5px; }
@@ -225,7 +228,7 @@ input[type=checkbox] { appearance: auto; accent-color: var(--accent-fg); width: 
 .group-row td { padding: 7px 13px; }
 .group-row.cols-4, .group-row.cols-5 { display: none; }
 .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(132px, 47%), 1fr)); gap: 10px; }
-.tile { padding: 7px; min-width: 0; border: 0.5px solid var(--line); border-radius: var(--r-md); background: var(--paper); }
+.tile { padding: 7px; min-width: 0; border: 0.5px solid var(--line); border-radius: var(--r-md); background: color-mix(in srgb, var(--paper) 90%, transparent); }
 .tile:hover { border-color: var(--border-strong); background: var(--hover); }
 .tile.selected { border-color: var(--accent-fg); background: var(--selected); }
 .tile-art { position: relative; display: grid; place-items: center; height: 97px; border-radius: var(--r-sm); background: color-mix(in srgb, var(--type-bg, var(--side)) 53%, var(--canvas)); }
@@ -500,7 +503,7 @@ span.gd-slot { display: inline-flex; align-items: center; }
 .asset-stage { scroll-padding-top: calc(var(--toolbar-h) + 38px); overscroll-behavior: contain; }
 .asset-intro { padding-block-start: clamp(14px, 2.6cqw, 25px); }
 .asset-table { border: 0; border-radius: 0; overflow: visible; }
-.asset-table.c-table th { top: 0; height: 38px; z-index: 2; background: var(--side); box-shadow: 0 1px var(--border-strong); }
+.asset-table.c-table th { top: 0; height: 38px; z-index: 2; background: color-mix(in srgb, var(--side) 94%, transparent); box-shadow: 0 1px var(--border-strong); }
 .asset-table td { height: 48px; }
 .asset-table th.col-more { width: 64px; }
 .asset-table th.col-state { width: 79px; }
@@ -560,6 +563,11 @@ span.gd-slot { display: inline-flex; align-items: center; }
   background: radial-gradient(ellipse 37% 54% at 20% -3%, color-mix(in srgb, var(--accent) 26%, transparent), transparent),
     radial-gradient(ellipse 41% 50% at 88% 2%, color-mix(in srgb, var(--accent) 18%, transparent), transparent),
     radial-gradient(ellipse 32% 46% at 54% 0%, color-mix(in srgb, var(--success) 18%, transparent), transparent), var(--canvas);
+  /* 截屏是「窗口后面有什么」，其中可能是另一个应用的正文。内容层只有 6% 透光，
+     但深色主题下白字会变成可读的幽灵字；先糊掉细节，只留下光色。 */
+  filter: blur(22px) saturate(1.08);
+  transform: scale(1.05);
+  transform-origin: center;
 }
 .vaulta-toolbar { display: flex; align-items: stretch; width: 100%; min-width: 0; gap: 0; padding: 0; }
 .vaulta-toolbar > .c-topbar { display: flex; align-items: stretch; width: 100%; min-width: 0; gap: 0; padding: 0; position: relative; inset: auto; height: auto; z-index: auto; pointer-events: auto; }
@@ -580,8 +588,6 @@ span.gd-slot { display: inline-flex; align-items: center; }
 .search-glass #query-slot :is(.c-field, .c-search) { --ctl-h: 28px; background: transparent; box-shadow: none; }
 .search-glass #query-slot .c-search:focus-within { background: color-mix(in srgb, var(--paper) 24%, transparent); }
 .searchbar > kbd { border: 0; }
-.rail, .rail-bottom { background: var(--side); }
-.workspace { background: var(--canvas); }
 .shell:not(.rail-hidden) { --rail-width: var(--rail-preference, var(--nav-w)); }
 #rail-grip { grid-area: 1/1; align-self: stretch; justify-self: end; position: relative; z-index: 4; margin-top: var(--toolbar-h); width: 9px; margin-inline-end: -4px; min-height: 0; }
 #rail-grip .c-resizer { inset-inline-start: 0; }

@@ -464,7 +464,10 @@ body {
   transition: opacity var(--dur-3) var(--ease-out);
 }
 
-#wallpaper[data-has-image="1"] {
+/* 两种属性都认：宿主脚本写 data-source="host"，旧版页面写 data-has-image="1"。
+   只认其中一个会让壁纸静默退回合成渐变 —— 截屏明明成功，画面却没有任何变化。 */
+#wallpaper[data-has-image="1"],
+#wallpaper[data-source="host"] {
   background: var(--wallpaper-image) center / cover no-repeat;
 }
 

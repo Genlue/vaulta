@@ -491,6 +491,11 @@ fn main() {
                 wake,
             });
             window_chrome::open(app, &db)?;
+            // The wallpaper layer needs a real sample of the desktop behind the
+            // window: backdrop-filter cannot read pixels outside the webview.
+            // install() also hides this window from capture APIs, otherwise the
+            // screenshot would contain Vaulta itself (mirror-in-mirror).
+            glass_design_host::install(app.handle()).map_err(|e| anyhow::anyhow!(e))?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -514,7 +519,8 @@ fn main() {
             set_agent_access,
             window_chrome::window_chrome_state,
             window_chrome::set_window_chrome_mode,
-            window_chrome::window_chrome_action
+            window_chrome::window_chrome_action,
+            glass_design_host::capture_backdrop
         ])
         .run(tauri::generate_context!());
     if let Err(err) = result {

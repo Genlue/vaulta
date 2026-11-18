@@ -1,0 +1,25 @@
+[package]
+name = "glass-design-host"
+version = "0.8.3"
+edition = "2021"
+rust-version = "1.88"
+description = "Tauri 2 host glue for glass-design: window setup, desktop backdrop capture, wallpaper wiring"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/Genlue/GlassDesign"
+keywords = ["tauri", "ui", "glass", "desktop", "windows"]
+categories = ["gui"]
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+png = "0.18"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_UI_WindowsAndMessaging",
+] }
