@@ -1,0 +1,47 @@
+/* A title strip reserved in the webview layout, never overlaid on scrolling content.
+   Material, type and metrics come from GlassDesign; only the strip height is local. */
+:root { --window-chrome-height: 34px; }
+#window-chrome[hidden] { display: none; }
+#window-chrome {
+  position: relative;
+  z-index: 5;
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+  height: var(--window-chrome-height);
+  flex: 0 0 var(--window-chrome-height);
+  color: var(--text-tertiary);
+  background: rgb(var(--glass-rgb) / var(--m-chrome-a));
+  box-shadow: inset 0 -0.5px 0 var(--line-soft);
+  backdrop-filter: blur(var(--m-chrome-blur)) saturate(var(--m-chrome-sat));
+  -webkit-backdrop-filter: blur(var(--m-chrome-blur)) saturate(var(--m-chrome-sat));
+  user-select: none;
+  -webkit-user-select: none;
+}
+#window-chrome:not([hidden]) ~ #app { height: calc(100% - var(--window-chrome-height)); }
+/* Traffic lights keep the library's 12px dot / 8px gap and sit on the toolbar's
+   left rhythm. Do not resize the dot here: the SVG geometry is fixed at 12px. */
+.window-chrome__lights { display: flex; align-items: center; padding-inline: var(--topbar-pad-l, 16px) var(--s-4, 8px); }
+.window-chrome__drag { flex: 1; min-width: 0; }
+.window-chrome__drag > span {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  color: var(--text-tertiary);
+  font-size: var(--fs-12);
+  font-weight: 500;
+  letter-spacing: var(--tracking-caption);
+}
+.window-chrome__fallback { display: flex; align-items: center; gap: var(--s-1, 2px); }
+.window-chrome__fallback button {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 22px;
+  line-height: 1;
+  border-radius: var(--r-xs, 6px);
+  color: var(--text-secondary);
+}
+.window-chrome__fallback button:hover { color: var(--text-primary); background: var(--surface-hover); }

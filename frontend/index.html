@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>vaulta</title>
+  <link rel="icon" href="./assets/vaulta.ico">
+  <link rel="stylesheet" href="./vendor/glassdesign/glass.css">
+  <link rel="stylesheet" href="./app.css">
+  <link rel="stylesheet" href="./window-chrome.css">
+  <script type="module" src="./app.js"></script>
+</head>
+<body>
+  <div id="wallpaper" aria-hidden="true"></div>
+  <div id="window-chrome" hidden></div>
+  <div id="app" class="shell">
+    <header class="chrome" id="chrome"></header>
+    <aside class="rail" id="rail" aria-label="仓库导航"></aside>
+    <div id="rail-grip"></div>
+    <main class="workspace" id="workspace" aria-label="工作区"></main>
+    <aside class="inspector" id="inspector" aria-label="资产详情" hidden></aside>
+    <footer class="status" id="status"></footer>
+  </div>
+  <dialog id="commands" class="command-dialog" aria-labelledby="commands-title"></dialog>
+  <dialog id="modal" class="dialog" aria-labelledby="dialog-title"></dialog>
+  <div id="pop" class="popover c-menu" hidden></div>
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+  <div id="glass-defs" aria-hidden="true"></div>
+</body>
+</html>

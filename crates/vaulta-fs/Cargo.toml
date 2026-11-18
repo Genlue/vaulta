@@ -1,0 +1,30 @@
+[package]
+name = "vaulta-fs"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+
+[target.'cfg(windows)'.dependencies]
+base64 = "0.22"
+flate2 = "1"
+lopdf = { version = "0.47", default-features = false }
+memchr = "2"
+quick-xml = "0.42"
+rawzip = "0.5"
+serde_json = "1"
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
+windows = { version = "0.62", features = [
+    "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Com",
+    "Win32_System_Registry", "Win32_UI_Shell_Common", "Win32_UI_WindowsAndMessaging",
+] }
+windows-core = "0.62"
+
+[dev-dependencies]
+tempfile = "3"
+
+

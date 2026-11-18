@@ -1,0 +1,3 @@
+# GlassDesign embedded web assets
+
+`glass_web.js`, `glass_web_bg.wasm`, `glass.css`, and `glass-defs.svg` are built/synced from the adjacent GlassDesign repository by `scripts/sync-glassdesign.ps1`. Source base: GlassDesign `a021546ef84a724970bb7b66fb45a1b315b9e20b` plus its reusable `web/` adapter, live component updates, optics, projected toolbar/capsules, split grip and traffic lights extensions delivered alongside Vaulta 0.3.0. JS and WASM are one build and should not be updated separately. `icons.js` is the upstream built-in icon-path snapshot from the same base; Vaulta aliases are in `frontend/glass.js`. See `LICENSE` for GlassDesign’s license.
