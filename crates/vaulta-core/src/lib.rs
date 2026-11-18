@@ -1,3 +1,4 @@
+mod classify;
 mod filesystem;
 mod metadata;
 mod model;
@@ -115,24 +116,29 @@ impl Binding {
 impl Core {
     /// Open the shared metadata database; no connection or mutex needs to cross threads.
     pub fn open(db_path: &Path) -> Result<Self> {
+        const VERSION: i64 = 2;
         let mut db = Connection::open(db_path)?;
         db.busy_timeout(Duration::from_secs(8))?;
         db.pragma_update(None, "foreign_keys", "ON")?;
         let version = db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))?;
-        if version != 1 {
+        if version != VERSION {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             match tx.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))? {
-                0 => {
-                    tx.execute_batch(include_str!("schema.sql"))?;
-                    tx.pragma_update(None, "user_version", 1)?;
+                0 => tx.execute_batch(include_str!("schema.sql"))?,
+                1 => {
+                    // v2 adds the classifier buckets, suggests a category for
+                    // existing files, and adopts the inventory that older
+                    // versions already showed. New files still wait in the inbox.
+                    metadata::auto_categorize(&tx)?;
+                    tx.execute("UPDATE settings SET revision=revision+1 WHERE id=1", [])?;
                 }
-                1 => (),
                 other => {
                     return Err(invalid(format!(
                         "unsupported Vaulta database version {other}"
                     )))
                 }
             }
+            tx.pragma_update(None, "user_version", VERSION)?;
             tx.commit()?;
         }
         Ok(Self { db })
@@ -517,4 +523,90 @@ fn audit(
 
 fn same_component(a: &str, b: &str) -> bool {
     filesystem::same_name(OsStr::new(a), OsStr::new(b))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_categorize_creates_buckets_and_backfills_existing_files() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(include_str!("schema.sql")).unwrap();
+        db.execute(
+            "INSERT INTO vaults(id,name,root,root_identity) VALUES('v','V','C:/v','root')",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO assets(id,vault_id,path,kind,size,modified,created,identity,links) VALUES('a','v','notes/plan.md','file',0,0,0,'file',1)",
+            [],
+        )
+        .unwrap();
+
+        metadata::auto_categorize(&db).unwrap();
+
+        let categories: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM categories WHERE vault_id='v'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(categories, classify::CATEGORIES.len() as i64);
+        let category: Option<String> = db
+            .query_row("SELECT category_id FROM assets WHERE id='a'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let name: String = db
+            .query_row(
+                "SELECT name FROM categories WHERE id=?1",
+                [category.expect("markdown gets a category")],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(name, "文档");
+        let state: String = db
+            .query_row("SELECT state FROM assets WHERE id='a'", [], |r| r.get(0))
+            .unwrap();
+        // The pre-v2 inventory was already visible, so the upgrade adopts it
+        // instead of hiding it behind an inbox the user never used.
+        assert_eq!(state, "filed");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn v1_database_is_adopted_and_classified_when_opened() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("files");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("plan.md"), b"# plan").unwrap();
+        let db = temp.path().join("meta.db");
+        let vault_id;
+        {
+            let mut core = Core::open(&db).unwrap();
+            let vault = core.add_vault(&root.canonicalize().unwrap(), "V").unwrap();
+            vault_id = vault.id;
+            core.scan(&vault_id).unwrap();
+        }
+        // Rewind the file to the shape an older version would have left behind.
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute("UPDATE assets SET category_id=NULL, state='inbox'", [])
+                .unwrap();
+            conn.execute("DELETE FROM categories", []).unwrap();
+            conn.pragma_update(None, "user_version", 1).unwrap();
+        }
+
+        let core = Core::open(&db).unwrap();
+        let snapshot = core.snapshot(&vault_id).unwrap();
+        let file = snapshot
+            .assets
+            .iter()
+            .find(|a| a.kind == "file")
+            .expect("scanned file");
+        assert_eq!(file.state, "filed");
+        assert!(file.category_id.is_some());
+    }
 }

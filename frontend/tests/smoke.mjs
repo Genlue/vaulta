@@ -78,7 +78,8 @@ function preload() {
   const D = Date.UTC(2026, 10, 16, 9, 23), makeVault = (id, name, root, parent_id = null, unit_id = null) => ({ id, name, root, parent_id, unit_id, view_enabled: false, view_categories: [], status: 'ready' });
   const item = (id, path, opts = {}) => ({ id, path, name: path.split('\\').at(-1), kind: 'file', size: 186460, modified: D, created: D, category_id: null, tags: [], flags: [], state: 'inbox', identity: 'test:' + id, ...opts });
   const seed = [item('a', '设计\u005c界面方案.md', { size: 2687, tags: ['设计', '2026'], flags: ['重点关注'], category_id: 'cat' }),
-    item('b', '设计\u005c封面.png', { tags: ['设计'], size: 1284962 }), item('c','导出\u005c封面副本.png'), item('d','说明.txt'),
+    item('b', '设计/封面.png', { tags: ['设计'], size: 1284962, state: 'filed' }), item('c','导出/封面副本.png', { state: 'filed' }), item('d','说明.txt', { state: 'filed' }),
+    item('i1','待整理/资料一.txt'), item('i2','待整理/资料二.txt'), item('i3','待整理/资料三.txt'),
     item('folder','设计', { kind: 'directory', state: 'filed' }), item('unit','短片项目', { kind: 'directory', state: 'filed' }),
     item('unit-content','短片项目\u005c分镜.md', { state: 'filed' }), item('e','不参与归档.pdf', { state: 'excluded' }), item('f','遗失的照片.jpg', { state: 'missing' })];
   const data = new Map(), watchers = new Map(), revisions = new Map(), access = new Map(), calls = [];
@@ -133,7 +134,12 @@ try {
   await shot('01-home');
   await click(action('new-vault')); await click(action('pick-folder')); await set('#modal input[name=name]', '设计素材'); await submit(); await close();
   await click(action('nav','inbox')); await wait(exists('.asset-row')); assert.equal(await get('document.querySelectorAll(".asset-row").length'),4);
-  await get(`[...document.querySelectorAll('.asset-row')].find(n=>n.textContent.includes('界面方案.md')).click()`); await wait(text('整理信息')); await shot('02-inbox');
+  await get(`[...document.querySelectorAll('.asset-row')].find(n=>n.textContent.includes('界面方案.md')).click()`);
+  // A plain click previews the file; metadata lives behind the 信息 tab.
+  await wait(text('设计构想'));
+  assert.equal(await get(`document.querySelector('#bulk').hidden`), true);
+  assert.ok(await get(`getComputedStyle(document.querySelector('.asset-row .col-check input')).opacity === '0'`));
+  await click(segment('inspect-tab','details')); await wait(text('整理信息')); await shot('02-inbox');
   await click(action('organize-one')); await set('#modal input[name=tags]', '设计，2026，已核对'); await submit(); await close(); await wait(text('已核对'));
   await click(segment('inspect-tab','preview')); await wait(exists('.markdown'));
   await get(`globalThis.oldPreview=document.querySelector('.preview-pane'); fixture.emit('vaulta-changed','')`);
@@ -147,7 +153,12 @@ try {
   await submit(); await wait(text('未覆盖')); assert.equal(await get('document.querySelector("#editor").value'),'# 未保存草稿'); await shot('03-editor-conflict');
   await click(action('reload-draft')); await wait(text('磁盘内容')); await click(action('use-disk-version')); await click(action('use-disk-version'));
   await get('fixture.conflict=false'); await set('#editor', '# 保存成功'); await submit(); await close(); await wait(text('保存成功'));
-  await click(action('nav','all')); await click(segment('library-mode','physical')); await wait(text('物理目录')); await click(segment('layout','grid')); await shot('04-physical-grid');
+  await click(action('nav','all')); await click(segment('library-mode','physical')); await wait(text('文件')); await click(segment('layout','grid')); await shot('04-physical-grid');
+  await click(segment('library-mode','all')); await wait(text('说明.txt'));
+  // The library only lists adopted assets; the inbox file stays in the tree.
+  assert.ok(await get(`!document.querySelector('#items').textContent.includes('界面方案.md')`));
+  await shot('04b-library');
+  await click(segment('library-mode','physical')); await wait(text('文件'));
   await get(`document.querySelectorAll('.tile').forEach(n=>{if(n.textContent.includes('短片项目'))n.querySelector('[data-act=asset-menu]').click()})`);
   await click(action('open-unit')); await wait(text('将文件夹设为整体单元')); await submit(); await close(); await wait(text('分镜.md'));
   await click(action('nav','settings')); await wait(exists('select[data-setting=agent]')); await set('select[data-setting=agent]','read'); await wait(text('允许外部工具访问')); await submit(); await close();

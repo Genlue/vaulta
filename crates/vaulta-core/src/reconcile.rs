@@ -317,6 +317,7 @@ impl ScanChanges {
 
 fn reconcile(db: &Connection, vault: &str, walk: &Walk) -> Result<ScanChanges> {
     let old = indexed(db, vault)?;
+    let categories = metadata::category_ids(db, vault)?;
     let mut by_identity: HashMap<&str, Vec<usize>> = HashMap::new();
     let mut live_by_path = HashMap::new();
     for (i, a) in old.iter().enumerate() {
@@ -423,8 +424,19 @@ fn reconcile(db: &Connection, vault: &str, walk: &Walk) -> Result<ScanChanges> {
                 continue;
             }
             let p = &entry.physical;
-            db.execute("INSERT INTO assets(id,vault_id,path,kind,size,modified,created,identity,links) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-                params![id(), vault, entry.path, if p.directory { "directory" } else { "file" }, p.size, p.modified, p.created, p.identity, p.links])?;
+            // A new file arrives with the best category we can name. This is a
+            // suggestion, not adoption: state stays at the default (inbox).
+            let category = (!p.directory)
+                .then(|| classify::category_for(&entry.path))
+                .flatten()
+                .and_then(|label| categories.get(label));
+            let asset_id = id();
+            // Folders are containers, not things to adopt; they enter the
+            // library directly. Files wait in the inbox until the user files
+            // them, even when the classifier already named a category.
+            let state = if p.directory { "filed" } else { "inbox" };
+            db.execute("INSERT INTO assets(id,vault_id,path,kind,size,modified,created,identity,links,category_id,state) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                params![asset_id, vault, entry.path, if p.directory { "directory" } else { "file" }, p.size, p.modified, p.created, p.identity, p.links, category, state])?;
             out.added += 1;
         }
     }
@@ -447,11 +459,19 @@ pub(crate) fn recover(
 ) -> Result<String> {
     let old = load_asset(db, vault_id, old_id)?;
     let new = load_asset(db, vault_id, new_id)?;
+    // A scan may have attached the classifier's suggestion before the user saw
+    // the replacement. That suggestion is not user metadata: any category that
+    // differs from it means the record was organized deliberately.
+    let categories = metadata::category_ids(db, vault_id)?;
+    let suggested =
+        classify::category_for(&new.path).and_then(|label| categories.get(label).cloned());
+    let pristine_category =
+        new.category_id.is_none() || new.category_id.as_deref() == suggested.as_deref();
     if old.state != "missing"
         || new.state != "inbox"
         || old.kind != new.kind
         || old.kind == "unit"
-        || new.category_id.is_some()
+        || !pristine_category
         || !new.tags.is_empty()
         || !new.flags.is_empty()
     {

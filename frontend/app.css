@@ -182,6 +182,12 @@ input[type=checkbox] { appearance: auto; accent-color: var(--accent-fg); width: 
 .asset-table td, .asset-table th { border-bottom: 0.5px solid var(--line); padding: 0 5px; }
 .asset-table tr:last-child td { border-bottom: 0; }
 .asset-table .col-check { text-align: center; }
+/* Selection chrome appears only when the user is actually multi-selecting; a
+   plain click is a preview, not the start of a batch. */
+.asset-table .col-check input, .tile .item-check { opacity: 0; visibility: hidden; transition: opacity .12s ease; }
+.asset-table tr:hover .col-check input, .asset-table.multi .col-check input,
+.tile:hover .item-check, .tiles.multi .item-check { opacity: 1; visibility: visible; }
+.asset-table:not(.multi) thead .col-check input { opacity: 0; visibility: hidden; pointer-events: none; }
 .asset-table td.col-size, .asset-table td.col-date { font-size: 11px; color: var(--muted); white-space: nowrap; }
 .asset-table td.col-more { padding: 0 3px; }
 .asset-table td.col-more button { width: 27px; }

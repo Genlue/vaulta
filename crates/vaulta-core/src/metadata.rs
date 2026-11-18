@@ -1,6 +1,7 @@
 use super::*;
+use crate::classify;
 use serde::Deserialize;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 struct Organization {
@@ -121,10 +122,82 @@ impl Core {
 }
 
 pub(crate) fn seed_categories(db: &Connection, vault: &str) -> Result<()> {
-    for label in ["文档", "图片", "音视频", "项目"] {
+    for label in classify::CATEGORIES {
         db.execute(
             "INSERT INTO categories(vault_id,id,name) VALUES(?1,?2,?3)",
             params![vault, id(), label],
+        )?;
+    }
+    Ok(())
+}
+
+/// Category ids by display name for one vault. Used by the classifier and by
+/// the explicit organize path, which both resolve names to ids.
+pub(crate) fn category_ids(db: &Connection, vault: &str) -> Result<HashMap<String, String>> {
+    let mut stmt = db.prepare("SELECT name,id FROM categories WHERE vault_id=?1")?;
+    let rows = stmt
+        .query_map([vault], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows.into_iter().collect())
+}
+
+/// One-time v2 migration. It creates the classifier buckets, suggests a category
+/// for every existing file, and adopts the live inventory that older versions
+/// already displayed in "all assets". Without that last step an upgrade would
+/// suddenly hide every file behind an inbox the user never used.
+pub(crate) fn auto_categorize(db: &Connection) -> Result<()> {
+    let vaults = {
+        let mut stmt = db.prepare("SELECT id FROM vaults")?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    for vault in vaults {
+        for label in classify::CATEGORIES {
+            let exists: bool = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM categories WHERE vault_id=?1 AND name=?2)",
+                params![vault, label],
+                |r| r.get(0),
+            )?;
+            if !exists {
+                db.execute(
+                    "INSERT INTO categories(vault_id,id,name) VALUES(?1,?2,?3)",
+                    params![vault, id(), label],
+                )?;
+            }
+        }
+        let categories = category_ids(db, &vault)?;
+        let pending = {
+            let mut stmt = db.prepare(
+                "SELECT id,path FROM assets
+                 WHERE vault_id=?1 AND kind='file' AND category_id IS NULL
+                   AND missing=0 AND shadowed=0 AND state<>'excluded'",
+            )?;
+            let rows = stmt
+                .query_map([&vault], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        for (asset, path) in pending {
+            let Some(category) = classify::category_for(&path)
+                .and_then(|label| categories.get(label))
+                .cloned()
+            else {
+                continue;
+            };
+            db.execute(
+                "UPDATE assets SET category_id=?2 WHERE id=?1 AND category_id IS NULL",
+                params![asset, category],
+            )?;
+        }
+        db.execute(
+            "UPDATE assets SET state='filed' WHERE vault_id=?1 AND state='inbox' AND missing=0 AND shadowed=0",
+            [&vault],
         )?;
     }
     Ok(())
@@ -231,10 +304,13 @@ fn prepare(db: &Connection, vault: &Vault, action: Mutation, patch: &mut Patch) 
             let remove_tags = names(remove_tags)?;
             let add_flags = names(add_flags)?;
             let remove_flags = names(remove_flags)?;
-            let mut stmt = db.prepare("SELECT category_id,tags,flags,state FROM assets WHERE vault_id=?1 AND id=?2 AND missing=0 AND shadowed=0")?;
+            let mut stmt = db.prepare("SELECT path,category_id,tags,flags,state FROM assets WHERE vault_id=?1 AND id=?2 AND missing=0 AND shadowed=0")?;
+            let mut auto_categories: Option<HashMap<String, String>> = None;
             for asset in &ids {
-                let before = stmt
-                    .query_row(params![vid, asset], |r| org(r, 0))
+                let (path, before) = stmt
+                    .query_row(params![vid, asset], |r| {
+                        Ok((r.get::<_, String>(0)?, org(r, 1)?))
+                    })
                     .optional()?
                     .ok_or_else(|| missing("live asset", asset))?;
                 let mut after = before.clone();
@@ -243,6 +319,24 @@ fn prepare(db: &Connection, vault: &Vault, action: Mutation, patch: &mut Patch) 
                 }
                 if let Some(state) = &state {
                     after.state.clone_from(state);
+                }
+                // Filing is the point where an unclassified file gets the best
+                // category we can name. An explicit "uncategorized" choice is
+                // preserved because it arrives through category_id.
+                if category_id.is_none()
+                    && state.as_deref() == Some("filed")
+                    && after.category_id.is_none()
+                {
+                    if let Some(label) = classify::category_for(&path) {
+                        if auto_categories.is_none() {
+                            auto_categories = Some(category_ids(db, vid)?);
+                        }
+                        if let Some(category) =
+                            auto_categories.as_ref().and_then(|map| map.get(label))
+                        {
+                            after.category_id = Some(category.clone());
+                        }
+                    }
                 }
                 after.tags.retain(|t| !remove_tags.contains(t));
                 after.tags.extend(

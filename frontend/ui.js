@@ -70,7 +70,7 @@ export function assetRow(item, selected, cross, source, marking = false) {
   const key = assetKey(item), mark = selected.has(key);
   return `<tr class="asset-row ${mark ? 'selected' : ''}" data-asset="${esc(key)}" tabindex="0" aria-selected="${mark}">
     <td class="col-check">${item.synthetic ? '' : itemCheck(item, mark)}</td>
-    <td class="col-name"><div class="row-asset">${visual(item)}<div class="row-identity"><strong class="ellipsis" title="${esc(item.name)}">${esc(item.name)}</strong><small class="ellipsis" title="${esc(item.rel)}">${cross ? `${esc(source)} · ` : ''}${esc(item.rel)}</small></div></div></td>
+    <td class="col-name"><div class="row-asset">${visual(item)}<div class="row-identity"><strong class="ellipsis" title="${esc(item.name)}">${esc(item.name)}</strong><small class="ellipsis" title="${esc(item.rel)}">${cross ? `${esc(source)} · ` : ''}${esc(item.rel === item.name ? assetType(item).name : item.rel)}</small></div></div></td>
     <td class="col-state">${marking ? markControl(item, true) : item.synthetic ? '—' : statePill(item)}</td>
     <td class="col-size">${esc(isDir(item) ? '—' : formatBytes(item.size))}</td>
     <td class="col-date">${esc(formatDate(item.modified))}</td>

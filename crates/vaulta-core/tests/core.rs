@@ -494,3 +494,38 @@ fn view_and_organize_noops_do_not_advance_revision() {
     assert!(vault.view_enabled);
     assert_eq!(vault.view_categories, [categories[0].id.clone()]);
 }
+
+#[test]
+fn scan_suggests_categories_and_filing_fills_the_gap() {
+    let mut s = Setup::new();
+    fs::create_dir_all(s.path("文档")).unwrap();
+    s.put("文档/计划.md");
+    s.put("封面.PNG");
+    s.put("素材.tar.gz");
+    s.put("license.bin");
+    s.scan();
+
+    let categories = s.core.snapshot(&s.vault.id).unwrap().categories;
+    let name = |asset: &Asset| {
+        asset
+            .category_id
+            .as_ref()
+            .and_then(|id| categories.iter().find(|c| &c.id == id))
+            .map(|c| c.name.as_str())
+    };
+    assert_eq!(name(&s.asset("文档/计划.md")), Some("文档"));
+    assert_eq!(name(&s.asset("封面.PNG")), Some("图片"));
+    assert_eq!(name(&s.asset("素材.tar.gz")), Some("压缩包"));
+    assert!(s.asset("license.bin").category_id.is_none());
+    // A suggestion is not adoption: the asset still waits in the inbox.
+    assert_eq!(s.asset("文档/计划.md").state, "inbox");
+
+    let doc = s.asset("文档/计划.md");
+    s.action(json!({"type":"organize","ids":[doc.id],"category_id":null}));
+    assert!(s.asset("文档/计划.md").category_id.is_none());
+    // Filing names the category again when the user did not choose one.
+    s.action(json!({"type":"organize","ids":[doc.id],"state":"filed"}));
+    let filed = s.asset("文档/计划.md");
+    assert_eq!(filed.state, "filed");
+    assert_eq!(name(&filed), Some("文档"));
+}

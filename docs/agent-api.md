@@ -33,7 +33,7 @@ Vaulta 不启动 Agent。用户在仓库设置中为每个仓库（包括整体�
 {"type":"organize","ids":["已查询的 asset ID"],"add_tags":["参考"],"remove_tags":[],"add_flags":["待处理"],"state":"filed"}
 ```
 
-- `organize`：多个 `ids` 可一次更新。可选的 `category_id` 缺省表示保留，`null` 表示清除；`remove_flags`、`add_flags`、`remove_tags`、`add_tags` 为可选增量。`state` 可缺省、`inbox` 或 `filed`。
+- `organize`：多个 `ids` 可一次更新。可选的 `category_id` 缺省表示保留，`null` 表示清除；`remove_flags`、`add_flags`、`remove_tags`、`add_tags` 为可选增量。`state` 可缺省、`inbox` 或 `filed`。把 `state` 设为 `filed` 且没有显式给出 `category_id` 时，核心会补上按扩展名推断的分类建议；`filed` 表示资产已进入资料库。
 - `category_save`：`name` 必填，`id` 缺省创建；用 `parent_id` 指定父分类或 `null` 指定根级。
 - `category_delete`：`id` 必填，`reassign_to` 为可选的重分配分类 ID；不会删除真实资产。
 - `tag_create` / `tag_delete`：`name`。

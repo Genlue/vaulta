@@ -119,7 +119,10 @@ export function visibleAssets({ assets, folders, categories, page, folder, facet
   else if (page === 'excluded' || page === 'missing') items = assets.filter(a => a.state === page);
   else {
     items = assets.filter(a => regular(a) && withinBoundary(a, folders.units));
-    if (page === 'physical') {
+    // The library is the adopted subset. Unadopted files stay visible in the
+    // disk tree and in the inbox, but never silently pad this list.
+    if (page === 'all') items = items.filter(a => a.state === 'filed');
+    else if (page === 'physical') {
       const key = pathKey(folder);
       items = items.filter(a => !isDir(a) && pathKey(parentPath(a.rel)) === key).concat(folders.children.get(key) || []);
     } else if (page === 'inbox') items = items.filter(a => a.state === 'inbox');

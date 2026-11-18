@@ -15,7 +15,7 @@ const systemTheme = matchMedia('(prefers-color-scheme: dark)');
 const setTheme = () => { document.documentElement.dataset.theme = prefs.theme === 'system' ? (systemTheme.matches ? 'dark' : 'light') : prefs.theme; };
 setTheme(); systemTheme.addEventListener('change', setTheme);
 const clearFilters = () => ({ category: '', tags: [], flags: [], type: '' });
-const S = { registry: [], cache: new Map(), id: null, page: 'home', facet: '', folder: '', filters: clearFilters(), selected: new Set(), anchor: null,
+const S = { registry: [], cache: new Map(), id: null, page: 'home', facet: '', folder: '', filters: clearFilters(), selected: new Set(), anchor: null, multi: false,
   markingLoading: false, markingErrors: new Map(), markMode: 'pending', review: false, reviewing: false, viewId: null, pane: true, tab: 'details', rail: true, items: [], byKey: new Map(), limit: 160, sort: 'name', direction: 'asc',
   edited: null, preview: null, previewToken: 0, loading: false, actionBusy: false, booting: true, error: '', notice: '',
   dup: null, dupToken: 0, registryToken: 0, changed: new Set(), pendingChanges: new Set(),
@@ -42,8 +42,8 @@ const libraryPages = new Set(['all', 'physical', 'category', 'tags', 'flags', 'r
 const markChoices = [...defaultFlags, '已核对'];
 
 const pages = {
-  home: ['仓库', 'house'], marking: ['待标记', 'flag'], inbox: ['收件箱', 'inbox', '从磁盘发现的新资产。可直接预览、整理或入库。'],
-  all: ['全部资产', 'layout-grid', '浏览并整理当前仓库中的所有在管资产。'], physical: ['物理目录', 'folder-tree', '按真实磁盘文件夹浏览。'],
+  home: ['仓库', 'house'], marking: ['待标记', 'flag'], inbox: ['收件箱', 'inbox', '磁盘上发现、但还没加入资料库的文件。扫描已按类型给出分类建议，入库后才会出现在资料库。'],
+  all: ['资料库', 'bookmark', '已入库的资产。未入库的文件只在「文件」和「收件箱」中显示。'], physical: ['文件', 'folder-tree', '按磁盘目录浏览。这里始终显示文件夹里的全部内容，不受入库状态影响。'],
   category: ['分类', 'layers', '主分类只改变逻辑归属，不会移动原文件。'], tags: ['标签', 'tag', '使用多个标签描述和查找同一份资产。'],
   flags: ['标记', 'flag', '标记用来记录关注状态，不影响分类或磁盘路径。'], recent: ['最近使用', 'clock', '显示在本机通过 vaulta 打开或预览过的资产。'],
   duplicates: ['重复文件', 'copy', '按文件内容识别完全重复的资产。每一份原文件都会保留。'],
@@ -80,6 +80,7 @@ function indexItems() {
     recent: prefs.recent, duplicates: S.dup?.map || new Map(), searchItems: S.searchItems, sort: S.page === 'recent' && S.sort === 'name' ? 'recent' : S.sort, direction: S.direction });
   S.byKey = new Map(S.items.map(item => [assetKey(item), item]));
   for (const key of S.selected) if (!S.byKey.has(key)) S.selected.delete(key);
+  if (!S.selected.size) S.multi = false;
 }
 function render({ keepScroll = true } = {}) {
   closeMenu(false);
@@ -191,7 +192,7 @@ function renderRail() {
   const hasVaults = !!S.registry.length;
   const inbox = snap().assets.filter(a => a.state === 'inbox').length;
   return `<nav class="rail-scroll c-nav" id="rail-scroll" aria-label="主要导航"><section class="rail-section lead"><div class="rail-label">浏览</div>
-    ${navLink('home', '仓库', 'house')}${hasVaults ? navLink('all', '资产库', 'layout-grid', 'all', { active: libraryPages.has(S.page) }) : ''}</section>
+    ${navLink('home', '仓库', 'house')}${hasVaults ? `${navLink('physical', '文件', 'folder-tree', 'physical', { active: S.page === 'physical' })}${navLink('all', '资料库', 'bookmark', 'all', { active: libraryPages.has(S.page) && !['physical', 'history'].includes(S.page) })}` : ''}</section>
     ${hasVaults ? `<section class="rail-section"><div class="rail-label">待办</div>${navLink('inbox', '收件箱', 'inbox', 'inbox', { count: inbox })}${navLink('marking', '待标记', 'flag', 'marking', { count: S.registry.every(v => S.cache.has(v.id) && !S.markingErrors.has(v.id)) ? pendingMarks : 0 })}</section>` : ''}</nav>
     <div class="rail-bottom">${navLink('settings', '设置', 'settings')}<div class="local-note">${icon('shield', 14)}<span>仅本机</span></div></div>`;
 }
@@ -214,7 +215,7 @@ function renderStatus() {
   let left = S.booting ? ['loader', '正在连接'] : !connected() ? ['info', '未连接桌面端'] : S.error ? ['triangle-alert', '同步未完成'] : S.loading ? ['loader', '正在读取仓库'] : ['circle-check', active ? '本地仓库' : '工作区就绪'];
   if (active?.status && active.status !== 'ready' && !S.loading && !S.error) left = ['triangle-alert', `${active.name} · ${statusLabel(active.status)}`];
   const statusFields = `<span class="status-left ${left[0] === 'circle-check' ? 'ready' : ''}">${icon(left[0], 14)}<span class="ellipsis">${esc(left[1])}</span></span>
-    <span class="status-middle ellipsis" title="${esc(active?.root || '')}">${esc(active?.root || '文件与数据存储在本机')}</span><span data-glass-slot="end" class="status-right">${configurationPage() ? `${roots().length} 个仓库` : `${S.items.length} 个项目${S.selected.size ? ` · 已选 ${S.selected.size}` : ''}`}</span>`;
+    <span class="status-middle ellipsis" title="${esc(active?.root || '')}">${esc(active?.root || '文件与数据存储在本机')}</span><span data-glass-slot="end" class="status-right">${configurationPage() ? `${roots().length} 个仓库` : `${S.items.length} 个项目${S.multi && S.selected.size ? ` · 已选 ${S.selected.size}` : ''}`}</span>`;
   redraw(status, widget('status-bar', {}, { tag: 'div', fallback: statusFields }));
 }
 function statusLabel(value) { return ({ ready: '就绪', partial: '扫描不完整', unavailable: '目录不可用' })[value] || value; }
@@ -284,7 +285,7 @@ function renderReview() {
   const content = `<div class="review-top"><div>${icon('square-check', 16)}<strong>逐项处理</strong><span>${empty ? '当前视图没有待处理项目' : `${items.length} 项待处理${index >= 0 ? ` · 第 ${index + 1} 项` : ''}`}</span></div>${ib('结束逐项处理', 'review-stop', 'x')}</div>
     ${item ? `<p class="ellipsis" title="${esc(item.rel || item.name)}">${esc(item.name)}</p>` : ''}
     ${empty ? '' : `<div class="review-tools">${button('上一个', 'review-prev', { glyph: 'chevron-left', style: 'secondary', disabled: S.reviewing || items.length < 2 })}${button('跳过 / 下一个', 'review-next', { glyph: 'chevron-right', style: 'secondary', disabled: S.reviewing || (items.length < 2 && !!item) })}${button('整理后入库…', 'review-organize', { glyph: 'tag', style: 'secondary', disabled: S.reviewing || !item })}${button('直接入库', 'review-file', { glyph: 'check', style: 'c-btn--primary', disabled: S.reviewing || !item })}</div>`}
-    <small>${S.reviewing ? '正在更新索引…' : '入库仅更新管理状态，不移动文件。跳过不会修改资产。'}</small>`;
+    <small>${S.reviewing ? '正在更新索引…' : '入库会把文件加入资料库，并按文件类型自动归类；不会移动原文件。'}</small>`;
   return widget('card', { className: 'review-card' }, { fallback: content, className: 'review-band', attrs: 'role=region aria-label="收件箱逐项处理"', tag: 'section' });
 }
 function updateReview() {
@@ -336,7 +337,7 @@ function commandsForContext() {
   const cmd = (label, glyph, action, value, group = '工作区', hint = '', keywords = '') => ({ label, glyph, action, value, group, hint, keywords });
   return [
     ...(S.registry.length ? [cmd('打开待标记', 'flag', 'nav', 'marking', '待办', '查看所有仓库中还没有标记的资产')] : []),
-    ...(vault() ? [cmd('打开收件箱', 'inbox', 'nav', 'inbox', '浏览', '', 'inbox'), cmd('浏览物理目录', 'folder-tree', 'nav', 'physical', '浏览', '', 'folder'), cmd('浏览全部资产', 'layout-grid', 'nav', 'all', '浏览'), cmd('最近使用', 'clock', 'nav', 'recent', '浏览'),
+    ...(vault() ? [cmd('打开收件箱', 'inbox', 'nav', 'inbox', '浏览', '', 'inbox'), cmd('浏览文件', 'folder-tree', 'nav', 'physical', '浏览', '', 'folder tree 目录 物理'), cmd('打开资料库', 'bookmark', 'nav', 'all', '浏览', '', 'library all assets 全部'), cmd('最近使用', 'clock', 'nav', 'recent', '浏览'),
       cmd('查找重复文件', 'copy', 'nav', 'duplicates', '整理'), cmd('扫描当前仓库', 'refresh-cw', 'rescan', null, '整理', 'F5', 'scan'), cmd('查看操作历史', 'clock', 'nav', 'history', '整理')] : []),
     ...(S.page === 'inbox' && S.items.length ? [cmd('逐项处理收件箱', 'square-check', 'review-start', null, '整理', '依次预览、整理和入库', 'inbox review')] : []),
     ...(canSaveView() ? [cmd('筛选当前资产', 'list-filter', 'filters', null, '整理'), cmd('保存此视图', 'star', 'save-view', null, '整理', '保存位置、筛选和排序')] : []),
@@ -388,7 +389,7 @@ function folderBreadcrumb() {
   return `<nav class="c-crumbs breadcrumbs" aria-label="物理路径"><button ${act('folder', '')}>${icon('hard-drive', 15)}<span>${esc(vault()?.name || '根目录')}</span></button>${pieces.map((name, i) => `${icon('chevron-right', 12)}<button ${act('folder', pieces.slice(0, i + 1).join('/'))} ${i === pieces.length - 1 ? 'aria-current="page"' : ''}>${esc(name)}</button>`).join('')}</nav>`;
 }
 const menuFallback = (label, name, glyph) => `<button class="c-btn c-btn--sm" type="button" ${act(name)} aria-haspopup="menu">${icon(glyph, 14)}<span>${esc(label)}</span></button>`;
-const browseModes = [['all', '全部'], ['category', '主分类'], ['tags', '标签'], ['physical', '磁盘目录']];
+const browseModes = [['physical', '目录'], ['all', '资料库'], ['category', '分类'], ['tags', '标签']];
 const utilityPages = ['recent', 'duplicates', 'missing', 'excluded', 'history'];
 function libraryItems() {
   return [...utilityPages.map(id => ({ label: pages[id][0], icon: pages[id][1], name: 'nav', value: id, checked: S.page === id })),
@@ -396,7 +397,7 @@ function libraryItems() {
 }
 function libraryBar() {
   if (!libraryPages.has(S.page) || !S.id) return '';
-  return `<div class="library-bar">${segmented('资产库浏览方式', browseModes, browseModes.some(([id]) => S.page === id) ? S.page : '', 'library-mode', 'library-segments')}
+  return `<div class="library-bar">${segmented('浏览方式', browseModes, browseModes.some(([id]) => S.page === id) ? S.page : '', 'library-mode', 'library-segments')}
     <div class="library-tools">${savedPicker()}${popupWidget('仓库工具', 'more', libraryItems(), menuFallback('仓库工具', 'library-menu', 'more'))}</div></div>`;
 }
 function facetsMarkup() {
@@ -443,7 +444,7 @@ function renderWorkspace() {
   return `<div class="stage asset-stage" id="stage">
     <div class="asset-intro">${errorStrip()}${S.notice ? `<div class="notice-row">${inlineNotice('warning', S.notice)}${ib('关闭提醒', 'hide-warning', 'x')}</div>` : ''}
     ${libraryBar()}<header class="page-heading asset-heading">${S.page === 'physical' ? folderBreadcrumb() : `<div class="page-context">${icon(glyph, 14)}<span>${esc(marking ? '全部仓库' : S.page === 'search' ? '全局查找' : vault()?.name || '仓库')}</span>${vault()?.parent_id && !marking && S.page !== 'search' ? `<button ${act('switch', vault().parent_id)}>返回上级仓库 ${icon('arrow-up-right', 12)}</button>` : ''}</div>`}
-      <div class="heading-row"><div><h1>${esc(savedViews().find(v => v.id === S.viewId)?.name || title)}</h1><p>${esc(S.page === 'search' && S.query.trim() ? `「${S.query.trim()}」 · ${searchScopeLabel()}${S.content ? ' · 含本地文本与可提取的文档内容' : ''}` : marking ? '集中处理所有仓库的标记。标记记录关注状态，不会入库、改标签或移动文件。' : desc)}</p></div><div class="heading-actions">${extra}${S.page === 'inbox' && S.items.length && !S.review ? button('逐项处理', 'review-start', { glyph: 'square-check', style: 'tinted' }) : ''}${canSaveView() ? ib(S.viewId ? '管理已保存视图' : '保存此视图', S.viewId ? 'manage-view' : 'save-view', 'star', { style: S.viewId ? 'soft' : '' }) : ''}${primary}</div></div>
+      <div class="heading-row"><div><h1>${esc(savedViews().find(v => v.id === S.viewId)?.name || title)}</h1><p>${esc(S.page === 'search' && S.query.trim() ? `「${S.query.trim()}」 · ${searchScopeLabel()}${S.content ? ' · 含本地文本与可提取的文档内容' : ''}` : marking ? '集中处理所有仓库的标记。标记记录关注状态，不会入库、改标签或移动文件。' : desc)}</p></div><div class="heading-actions">${extra}${S.page === 'inbox' && S.items.length && !S.review ? `${button(`全部入库 · ${S.items.length}`, 'file-in-all', { glyph: 'check', style: 'tinted' })}${button('逐项处理', 'review-start', { glyph: 'square-check', style: 'secondary' })}` : ''}${canSaveView() ? ib(S.viewId ? '管理已保存视图' : '保存此视图', S.viewId ? 'manage-view' : 'save-view', 'star', { style: S.viewId ? 'soft' : '' }) : ''}${primary}</div></div>
     </header>
     ${markingControls()}${facetsMarkup()}${renderReview()}</div>
     <div class="asset-toolbar"><div class="asset-summary"><strong>${S.items.length.toLocaleString('zh-CN')}</strong> 个项目${S.page === 'duplicates' && S.dup?.groups?.length ? ` · ${S.dup.groups.length} 组重复` : ''}</div><div class="asset-tools">${S.page === 'search' || marking ? '' : button(count ? `筛选 · ${count}` : '筛选', 'filters', { glyph: 'list-filter', style: count ? 'tinted' : 'secondary' })}${sortMenu()}${segmented('资产视图', [['list', '列表', 'list'], ['grid', '网格', 'layout-grid']], prefs.layout, 'layout', 'view-switch')}</div></div>
@@ -469,7 +470,7 @@ function renderBulk() {
   const marking = S.page === 'marking';
   const excluded = real.length && real.every(a => a.state === 'excluded'), missing = real.some(a => a.state === 'missing');
   const selectables = S.items.filter(a => !a.synthetic), all = selectables.length && real.length === selectables.length;
-  return `<div class="bulk-band" id="bulk" ${real.length ? '' : 'hidden'}><div><input type="checkbox" data-select-all aria-label="选择全部结果" ${all ? 'checked' : ''}><strong>已选 ${real.length} 项</strong>${ib('清除选择', 'clear-selection', 'x')}</div><div class="bulk-actions">
+  return `<div class="bulk-band" id="bulk" ${S.multi && real.length ? '' : 'hidden'}><div><input type="checkbox" data-select-all aria-label="选择全部结果" ${all ? 'checked' : ''}><strong>已选 ${real.length} 项</strong>${ib('清除选择', 'clear-selection', 'x')}</div><div class="bulk-actions">
     ${marking ? button('批量添加标记', 'mark-selected', { glyph: 'flag', style: 'tinted' }) : missing ? '' : excluded ? button('重新纳入', 'restore', { glyph: 'undo' }) : `${button('整理', 'organize', { glyph: 'tag' })}${real.some(a => a.state === 'inbox') ? button('入库', 'file-in', { glyph: 'check' }) : ''}${button('移动', 'move', { glyph: 'move' })}`}${marking ? '' : ib('更多批量操作', 'bulk-menu', 'more', { attrs: 'aria-haspopup="menu"' })}</div></div>`;
 }
 function renderAssets() {
@@ -479,9 +480,13 @@ function renderAssets() {
   if (S.page === 'search' && !S.query.trim()) return blank('search', '开始搜索', '输入名称、类型、路径、分类或标签。');
   const partial = S.page === 'search' && S.searchErrors.length ? `<details class="search-fail"><summary>${S.searchErrors.length} 项搜索未完成，部分结果可能缺失</summary><ul>${S.searchErrors.map(e => `<li>${esc(e)}</li>`).join('')}</ul></details>` : '';
   if (!S.items.length) {
-    const empties = { marking: S.markingErrors.size ? ['当前没有已读取的结果', '部分仓库尚未读取，展开上方提醒查看。'] : S.markMode === 'marked' ? ['还没有已标记资产', '给资产添加标记后，就能在这里查阅。'] : ['没有待标记资产', '所有可见在管资产都已有标记。移除某项的最后一个标记，它会回到这里。'], inbox: ['收件箱是空的', '在仓库目录中添加文件，vaulta 会在这里显示新资产。'], all: ['还没有资产', '将文件放入仓库目录，然后扫描查看。'], physical: ['此文件夹为空', '你可以新建文件夹，或在资源管理器中添加文件。'], category: ['没有分类资产', '可以在资产详情中设置主分类。'], tags: ['没有带标签的资产', '可以在资产详情中添加标签。'], flags: ['没有带标记的资产', '可以在资产详情中设置标记。'], recent: ['还没有最近记录', '打开或预览资产后，它会显示在这里。'], duplicates: S.dup?.loading ? ['正在比对文件', '正在检查文件内容。'] : S.dup?.error ? ['未能检查重复文件', S.dup.error] : ['没有重复文件', '目前没有找到内容完全相同的文件。'], excluded: ['没有已排除的资产', '从仓库排除的项目将显示在这里。'], missing: ['没有已缺失的资产', '当前没有需要处理的丢失记录。'], search: ['没有匹配的资产', '试试更短的关键词，或调整搜索范围。'] };
+    const empties = { marking: S.markingErrors.size ? ['当前没有已读取的结果', '部分仓库尚未读取，展开上方提醒查看。'] : S.markMode === 'marked' ? ['还没有已标记资产', '给资产添加标记后，就能在这里查阅。'] : ['没有待标记资产', '所有可见在管资产都已有标记。移除某项的最后一个标记，它会回到这里。'], inbox: ['收件箱是空的', '磁盘上发现的内容都已入库。新加入仓库的文件会先出现在这里。'], all: ['资料库还是空的', '把「文件」或「收件箱」中的资产入库后，就会出现在这里。'], physical: ['此文件夹为空', '可以新建文件夹，或在资源管理器中放入文件后重新扫描。'], category: ['没有分类资产', '扫描会按文件类型给出分类建议，入库时自动采用。'], tags: ['没有带标签的资产', '可以在资产详情中添加标签。'], flags: ['没有带标记的资产', '可以在资产详情中设置标记。'], recent: ['还没有最近记录', '打开或预览资产后，它会显示在这里。'], duplicates: S.dup?.loading ? ['正在比对文件', '正在检查文件内容。'] : S.dup?.error ? ['未能检查重复文件', S.dup.error] : ['没有重复文件', '目前没有找到内容完全相同的文件。'], excluded: ['没有已排除的资产', '从仓库排除的项目将显示在这里。'], missing: ['没有已缺失的资产', '当前没有需要处理的丢失记录。'], search: ['没有匹配的资产', '试试更短的关键词，或调整搜索范围。'] };
     const [heading, hint] = filterCount() ? ['没有符合筛选条件的资产', '减少筛选条件以查看更多结果。'] : empties[S.page] || ['还没有项目', ''];
-    return partial + blank(pages[S.page][1], heading, hint, filterCount() ? button('清除筛选', 'clear-filters', { style: 'secondary' }) : ['inbox', 'all'].includes(S.page) ? button('浏览物理目录', 'folder', { value: '', glyph: 'folder-open', style: 'secondary' }) : '');
+    const cta = filterCount() ? button('清除筛选', 'clear-filters', { style: 'secondary' })
+      : S.page === 'all' ? button('打开收件箱', 'nav', { value: 'inbox', glyph: 'inbox', style: 'secondary' })
+      : ['inbox', 'physical'].includes(S.page) ? button('浏览文件', 'nav', { value: 'physical', glyph: 'folder-open', style: 'secondary' })
+      : '';
+    return partial + blank(pages[S.page][1], heading, hint, cta);
   }
   const marking = S.page === 'marking', cross = S.page === 'search' || marking, chunk = S.items.slice(0, S.limit);
   const sortAria = key => S.sort === key ? `aria-sort="${S.direction === 'asc' ? 'ascending' : 'descending'}"` : '';
@@ -491,8 +496,8 @@ function renderAssets() {
     const group = S.dup.map.get(item.id);
     return group !== S.dup.map.get(chunk[index - 1]?.id) ? `重复组 ${group + 1} · ${S.dup.groups[group].length} 个文件` : '';
   };
-  const main = prefs.layout === 'grid' ? `<div class="tiles" id="items">${chunk.map((a, i) => `${groupTitle(a, i) ? `<div class="group-title">${esc(groupTitle(a, i))}</div>` : ''}${assetCard(a, S.selected, cross, sourceName(a.vaultId), S.page === 'physical', marking)}`).join('')}</div>`
-    : `<table class="asset-table c-table" id="items"><thead><tr><th class="col-check"><input type="checkbox" data-select-all aria-label="选择全部结果" ${S.items.some(a => !a.synthetic) && S.items.filter(a => !a.synthetic).every(a => S.selected.has(assetKey(a))) ? 'checked' : ''}></th><th ${sortAria('name')}>${sortBtn('name', '名称')}</th><th class="col-state">${marking ? '标记' : '入库状态'}</th><th class="col-size" ${sortAria('size')}>${sortBtn('size', '大小')}</th><th class="col-date" ${sortAria('modified')}>${sortBtn('modified', '修改日期')}</th><th class="col-more"></th></tr></thead><tbody>${chunk.map((a, i) => `${groupTitle(a, i) ? [6, 5, 4].map(n => `<tr class="group-row cols-${n}"><td colspan="${n}">${esc(groupTitle(a, i))}</td></tr>`).join('') : ''}${assetRow(a, S.selected, cross, sourceName(a.vaultId), marking)}`).join('')}</tbody></table>`;
+  const main = prefs.layout === 'grid' ? `<div class="tiles${S.multi ? ' multi' : ''}" id="items">${chunk.map((a, i) => `${groupTitle(a, i) ? `<div class="group-title">${esc(groupTitle(a, i))}</div>` : ''}${assetCard(a, S.selected, cross, sourceName(a.vaultId), S.page === 'physical', marking)}`).join('')}</div>`
+    : `<table class="asset-table c-table${S.multi ? ' multi' : ''}" id="items"><thead><tr><th class="col-check"><input type="checkbox" data-select-all aria-label="选择全部结果" ${S.items.some(a => !a.synthetic) && S.items.filter(a => !a.synthetic).every(a => S.selected.has(assetKey(a))) ? 'checked' : ''}></th><th ${sortAria('name')}>${sortBtn('name', '名称')}</th><th class="col-state">${marking ? '标记' : '入库状态'}</th><th class="col-size" ${sortAria('size')}>${sortBtn('size', '大小')}</th><th class="col-date" ${sortAria('modified')}>${sortBtn('modified', '修改日期')}</th><th class="col-more"></th></tr></thead><tbody>${chunk.map((a, i) => `${groupTitle(a, i) ? [6, 5, 4].map(n => `<tr class="group-row cols-${n}"><td colspan="${n}">${esc(groupTitle(a, i))}</td></tr>`).join('') : ''}${assetRow(a, S.selected, cross, sourceName(a.vaultId), marking)}`).join('')}</tbody></table>`;
   return partial + main + (S.items.length > S.limit ? `<div class="load-more">${button(`显示更多 · 剩余 ${S.items.length - S.limit} 项`, 'more-items', { style: 'secondary' })}</div>` : '');
 }
 function renderHistory() {
@@ -535,7 +540,7 @@ function renderAssetDetails(a) {
   const index = a.vaultId === S.id ? catIndex : makeCategoryIndex(S.cache.get(a.vaultId)?.categories || []);
   const category = ancestry(a.category_id, index).map(c => c.name).join(' / '), identity = typeof a.identity === 'string' ? a.identity : a.identity == null ? '' : JSON.stringify(a.identity);
   return `<div class="asset-profile">${visual(a, 'profile')}<h2 title="${esc(a.name)}">${esc(a.name)}</h2><div>${pill(assetType(a).name)}${a.synthetic ? '' : statePill(a)}</div></div>
-    <div class="detail-tools">${disabled ? '' : button(isDir(a) ? a.kind === 'unit' ? '进入整体单元' : '打开文件夹' : '打开文件', 'open-asset', { value: key, glyph: 'external-link', style: 'secondary' })}${ib('更多资产操作', 'asset-menu', 'more', { value: key })}</div>
+    <div class="detail-tools">${disabled ? '' : `${a.state === 'inbox' ? button('入库', 'file-in-one', { value: key, glyph: 'check', style: 'c-btn--primary' }) : ''}${button(isDir(a) ? a.kind === 'unit' ? '进入整体单元' : '打开文件夹' : '打开文件', 'open-asset', { value: key, glyph: 'external-link', style: 'secondary' })}`}${ib('更多资产操作', 'asset-menu', 'more', { value: key })}</div>
     ${a.state === 'missing' ? `<div class="detail-callout">${icon('triangle-alert', 16)}<span>找不到原文件，仅显示上次记录。</span>${button('核对并关联身份', 'recover-identity', { value: key, style: 'secondary' })}</div>` : ''}
     ${a.state === 'excluded' ? `<div class="detail-callout">${icon('ban', 16)}<span>文件仍在磁盘上。</span>${button('重新纳入', 'restore-one', { value: key, style: 'secondary' })}</div>` : ''}
     ${!a.synthetic ? `<section class="inspect-section"><header><h3>整理信息</h3>${ib('编辑整理信息', 'organize-one', 'square-pen', { value: key, disabled: !live })}</header><dl>
@@ -740,7 +745,7 @@ async function refreshView(id = S.id, fresh = true) {
   catch (error) { if (id === S.id) S.error = msg(error); else throw error; }
   finally { if (id === S.id) { S.loading = false; render(); } }
 }
-function clearSelection() { S.selected.clear(); S.anchor = null; S.previewToken++; S.preview = null; S.tab = 'details'; }
+function clearSelection() { S.selected.clear(); S.anchor = null; S.multi = false; S.previewToken++; S.preview = null; S.tab = 'details'; }
 function resetView() { S.limit = 160; S.filters = clearFilters(); clearSelection(); S.error = ''; }
 function nav(page, opts = {}) {
   if (!pages[page]) return;
@@ -754,11 +759,10 @@ function nav(page, opts = {}) {
   if (page === 'duplicates') void getDuplicates();
   if (page === 'settings') void readApi();
 }
-async function switchVault(id, page = 'inbox', folder = '') {
+async function switchVault(id, page = 'physical', folder = '') {
   if (!getVault(id)) return;
   S.id = id; persist('active', id); S.notice = ''; S.dup = null; S.dupToken++;
   S.loading = !S.cache.has(id);
-  if (page === 'inbox' && !getVault(id)?.parent_id && S.page !== 'inbox') page = 'all';
   nav(page, { folder }); await refreshView(id, false);
 }
 async function getDuplicates() {
@@ -772,9 +776,12 @@ async function getDuplicates() {
   } catch (error) { if (token === S.dupToken && S.id === id) S.dup = { error: msg(error) }; }
   if (token === S.dupToken && S.page === 'duplicates') render();
 }
-function selectedKeys(key, additive, range) {
+function selectedKeys(key, additive, range, reveal = true) {
   const item = itemAt(key); if (!item) return;
   const prev = one();
+  // A plain click is "show me this", not "start selecting". Checkbox, Ctrl and
+  // Shift clicks are the explicit way into multi-selection.
+  S.multi = !!(additive || range);
   if (range && S.anchor && S.byKey.has(S.anchor)) {
     let a = S.items.findIndex(item => assetKey(item) === S.anchor), b = S.items.findIndex(item => assetKey(item) === key);
     if (!additive) S.selected.clear();
@@ -786,6 +793,13 @@ function selectedKeys(key, additive, range) {
     if (additive && S.selected.has(key)) S.selected.delete(key);
     else S.selected.add(key);
     S.anchor = key;
+  }
+  // Deselecting the last row leaves multi-selection instead of an empty bar.
+  if (!S.selected.size) S.multi = false;
+  if (reveal && !S.multi) {
+    // Clicking a row should reveal the thing itself, not its metadata form.
+    S.pane = true;
+    S.tab = isDir(item) ? 'details' : 'preview';
   }
   syncSelection(prev);
 }
@@ -799,6 +813,7 @@ function syncSelection(old) {
   if (!item || item.synthetic || item.state === 'missing') S.tab = 'details';
   const bulk = $('#bulk'); if (bulk) { unmount(bulk); bulk.outerHTML = renderBulk(); mount($('#bulk')); }
   updateReview();
+  $('#items')?.classList.toggle('multi', S.multi);
   for (const node of workspace.querySelectorAll('[data-asset]')) {
     const selected = S.selected.has(node.dataset.asset); node.classList.toggle('selected', selected);
     if (node.hasAttribute('aria-selected')) node.setAttribute('aria-selected', selected);
@@ -809,7 +824,7 @@ function syncSelection(old) {
   if (item && S.pane && S.tab === 'preview' && !S.preview) void loadPreview(item);
 }
 function selectAll(checked) {
-  const old = one(); S.selected = checked ? new Set(S.items.filter(a => !a.synthetic).map(assetKey)) : new Set(); syncSelection(old);
+  const old = one(); S.selected = checked ? new Set(S.items.filter(a => !a.synthetic).map(assetKey)) : new Set(); S.multi = checked; syncSelection(old);
 }
 function remember(item) {
   const key = assetKey(item);
@@ -827,7 +842,7 @@ async function loadPreview(a, { used = true } = {}) {
 }
 function previewOne(a) {
   if (!a || a.synthetic || a.state === 'missing') return;
-  S.selected = new Set([assetKey(a)]); S.anchor = assetKey(a); S.pane = true; S.tab = 'preview';
+  S.selected = new Set([assetKey(a)]); S.anchor = assetKey(a); S.multi = false; S.pane = true; S.tab = 'preview';
   const old = S.preview?.key === assetKey(a) ? a : null; syncSelection(old);
   renderChromeInto();
   if (!S.preview) void loadPreview(a);
@@ -1294,6 +1309,11 @@ async function action(name, value, node) {
     case 'organize': return organize(picked);
     case 'organize-one': return a && organize([a]);
     case 'file-in': return batchOrganize(picked.filter(i => i.state === 'inbox' && !i.synthetic), { state: 'filed' }, '已入库');
+    case 'file-in-all': {
+      const items = S.items.filter(i => !i.synthetic && i.state === 'inbox');
+      if (!items.length) return;
+      return batchOrganize(items, { state: 'filed' }, '已加入资料库');
+    }
     case 'file-in-one': return a && batchOrganize([a], { state: 'filed' }, '已入库');
     case 'restore': return batchOrganize(picked.filter(i => i.state === 'excluded'), { state: 'inbox' }, '已重新纳入');
     case 'restore-one': return a && batchOrganize([a], { state: 'inbox' }, '已重新纳入');
@@ -1346,7 +1366,7 @@ document.addEventListener('dblclick', event => {
 document.addEventListener('contextmenu', event => {
   const node = event.target.closest('[data-asset]'); if (!node || modal.open) return;
   event.preventDefault();
-  if (!S.selected.has(node.dataset.asset)) selectedKeys(node.dataset.asset, false, false);
+  if (!S.selected.has(node.dataset.asset)) selectedKeys(node.dataset.asset, false, false, false);
   assetMenu(node, resolveItem(node.dataset.asset), { x: event.clientX, y: event.clientY });
 });
 document.addEventListener('change', event => {
@@ -1391,7 +1411,7 @@ document.addEventListener('keydown', e => {
   if (ctrl && key.toLowerCase() === 'a') { e.preventDefault(); selectAll(true); }
   else if (key === 'Escape') clearAndSync();
   else if (key === 'Enter' && a && !e.target.closest('button')) { e.preventDefault(); perform('open-asset', assetKey(a), tile); }
-  else if (key === ' ' && a && !e.target.closest('button')) { e.preventDefault(); previewOne(a); }
+  else if (key === ' ' && a && !e.target.closest('button')) { e.preventDefault(); if (ctrl) selectedKeys(assetKey(a), true, false, false); else previewOne(a); }
   else if (key === 'F2' && a && !a.synthetic && !['excluded','missing'].includes(a.state)) { e.preventDefault(); renameFile(a); }
   else if (key === 'F5') { e.preventDefault(); perform('rescan'); }
   else if (key === 'Delete' && S.selected.size) { e.preventDefault(); recycle(selection()); }
@@ -1437,7 +1457,7 @@ async function boot() {
     if (!listening) { listening = true; host.listen(changed, warning).catch(error => { listening = false; toast(msg(error), 'warn'); }); }
     await loadRegistry();
     const last = stored('active', null), initial = getVault(last) || roots()[0];
-    if (initial) { await switchVault(initial.id, 'all'); void loadMarking(); }
+    if (initial) { await switchVault(initial.id, 'physical'); void loadMarking(); }
   } catch (error) { S.error = msg(error); }
   finally { S.booting = false; render(); }
 }
