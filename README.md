@@ -32,8 +32,10 @@ cargo tauri dev
 cargo test --workspace --locked
 node frontend/tests/smoke.mjs
 pwsh -NoProfile -File scripts/test-native-windows.ps1
-powershell -ExecutionPolicy Bypass -File scripts/build-windows.ps1
+pwsh -NoProfile -File scripts/build-windows.ps1
 ```
+
+打包脚本默认把 patch 版本加一（0.3.0 → 0.3.1），同时改写 `src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 与 `Cargo.lock`，安装包和便携包因此不会互相覆盖。发 minor/major 版本用 `-Version 0.4.0` 指定；只想原地重打当前版本用 `-NoBump`。
 
 普通构建直接使用已检入的 `frontend/vendor/glassdesign`，不要求安装 WASM 工具链。修改相邻的 GlassDesign 仓库后，在 Vaulta 根目录执行 `pwsh -NoProfile -File scripts/sync-glassdesign.ps1` 同步新产物；非默认位置可指定 `-GlassDesignPath`。对应的 `glass-web` 配置、组件属性、事件与生命周期在 GlassDesign 的 `web/README.md`。
 

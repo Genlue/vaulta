@@ -1,6 +1,6 @@
 [package]
 name = "vaulta"
-version = "0.3.0"
+version = "0.3.1"
 description = "Local-first personal digital asset library"
 edition = "2024"
 rust-version = "1.90"
