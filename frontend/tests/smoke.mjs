@@ -161,6 +161,8 @@ try {
   await click(segment('library-mode','physical')); await wait(text('文件'));
   await get(`document.querySelectorAll('.tile').forEach(n=>{if(n.textContent.includes('短片项目'))n.querySelector('[data-act=asset-menu]').click()})`);
   await click(action('open-unit')); await wait(text('将文件夹设为整体单元')); await submit(); await close(); await wait(text('分镜.md'));
+  // Inside a folder unit the tree still offers a way back to the parent vault.
+  assert.ok(await get(`!!document.querySelector('.breadcrumbs [data-act=switch]')`));
   await click(action('nav','settings')); await wait(exists('select[data-setting=agent]')); await set('select[data-setting=agent]','read'); await wait(text('允许外部工具访问')); await submit(); await close();
   await wait(`fixture.calls.some(([c,p])=>c==='set_agent_access'&&p.vaultId==='unit-v'&&p.access==='read')`);
   await click('.agent-docs summary'); await shot('05-agent-settings');

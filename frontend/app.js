@@ -386,7 +386,7 @@ commandDialog.addEventListener('keydown', event => {
 
 function folderBreadcrumb() {
   const pieces = splitPath(S.folder);
-  return `<nav class="c-crumbs breadcrumbs" aria-label="物理路径"><button ${act('folder', '')}>${icon('hard-drive', 15)}<span>${esc(vault()?.name || '根目录')}</span></button>${pieces.map((name, i) => `${icon('chevron-right', 12)}<button ${act('folder', pieces.slice(0, i + 1).join('/'))} ${i === pieces.length - 1 ? 'aria-current="page"' : ''}>${esc(name)}</button>`).join('')}</nav>`;
+  return `<nav class="c-crumbs breadcrumbs" aria-label="物理路径"><button ${act('folder', '')}>${icon('hard-drive', 15)}<span>${esc(vault()?.name || '根目录')}</span></button>${pieces.map((name, i) => `${icon('chevron-right', 12)}<button ${act('folder', pieces.slice(0, i + 1).join('/'))} ${i === pieces.length - 1 ? 'aria-current="page"' : ''}>${esc(name)}</button>`).join('')}${vault()?.parent_id ? `${icon('chevron-right', 12)}<button ${act('switch', vault().parent_id)} title="返回上级仓库">${icon('arrow-up-right', 12)}<span>返回上级</span></button>` : ''}</nav>`;
 }
 const menuFallback = (label, name, glyph) => `<button class="c-btn c-btn--sm" type="button" ${act(name)} aria-haspopup="menu">${icon(glyph, 14)}<span>${esc(label)}</span></button>`;
 const browseModes = [['physical', '目录'], ['all', '资料库'], ['category', '分类'], ['tags', '标签']];
@@ -1154,7 +1154,7 @@ function beginSearch(value, immediate = false) {
     const origin = S.searchOrigin;
     S.searchOrigin = null;
     if (origin && origin.vaultId === S.id) { S.sort = origin.sort; S.direction = origin.direction; nav(origin.page, origin); }
-    else nav(S.id ? 'inbox' : 'home');
+    else nav(S.id ? 'physical' : 'home');
     return;
   }
   if (S.page !== 'search') { S.searchOrigin = { vaultId: S.id, page: S.page, facet: S.facet, folder: S.folder, filters: structuredClone(S.filters), viewId: S.viewId, sort: S.sort, direction: S.direction }; S.page = 'search'; S.facet = ''; S.review = false; S.viewId = null; resetView(); }
@@ -1315,8 +1315,8 @@ async function action(name, value, node) {
       return batchOrganize(items, { state: 'filed' }, '已加入资料库');
     }
     case 'file-in-one': return a && batchOrganize([a], { state: 'filed' }, '已入库');
-    case 'restore': return batchOrganize(picked.filter(i => i.state === 'excluded'), { state: 'inbox' }, '已重新纳入');
-    case 'restore-one': return a && batchOrganize([a], { state: 'inbox' }, '已重新纳入');
+    case 'restore': return batchOrganize(picked.filter(i => i.state === 'excluded'), { state: 'filed' }, '已重新纳入');
+    case 'restore-one': return a && batchOrganize([a], { state: 'filed' }, '已重新纳入');
     case 'exclude': return exclude(picked);
     case 'exclude-one': return a && exclude([a]);
     case 'recycle': return recycle(picked);
