@@ -1,39 +1,30 @@
-/* A title strip reserved in the webview layout, never overlaid on scrolling content.
-   Material, type and metrics come from GlassDesign; only the strip height is local. */
-:root { --window-chrome-height: 34px; }
+/* Window controls are the first item of the floating capsule row, not a title
+   strip of their own. Material, type and metrics come from GlassDesign. */
+:root { --window-chrome-height: var(--toolbar-h); }
 #window-chrome[hidden] { display: none; }
+/* The window controls are the first item of the floating capsule row. The
+   strip no longer owns a material or a full row: it is exactly as wide as the
+   lights and inherits the toolbar's vertical rhythm. */
 #window-chrome {
   position: relative;
-  z-index: 5;
+  z-index: auto;
   display: flex;
-  align-items: stretch;
+  align-items: center;
+  flex: 0 0 auto;
   min-width: 0;
-  height: var(--window-chrome-height);
-  flex: 0 0 var(--window-chrome-height);
+  height: 100%;
   color: var(--text-tertiary);
-  background: rgb(var(--glass-rgb) / var(--m-chrome-a));
-  box-shadow: inset 0 -0.5px 0 var(--line-soft);
-  backdrop-filter: blur(var(--m-chrome-blur)) saturate(var(--m-chrome-sat));
-  -webkit-backdrop-filter: blur(var(--m-chrome-blur)) saturate(var(--m-chrome-sat));
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
   user-select: none;
   -webkit-user-select: none;
 }
-#window-chrome:not([hidden]) ~ #app { height: calc(100% - var(--window-chrome-height)); }
-/* Traffic lights keep the library's 12px dot / 8px gap and sit on the toolbar's
-   left rhythm. Do not resize the dot here: the SVG geometry is fixed at 12px. */
-.window-chrome__lights { display: flex; align-items: center; padding-inline: var(--topbar-pad-l, 16px) var(--s-4, 8px); }
-.window-chrome__drag { flex: 1; min-width: 0; }
-.window-chrome__drag > span {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  pointer-events: none;
-  color: var(--text-tertiary);
-  font-size: var(--fs-12);
-  font-weight: 500;
-  letter-spacing: var(--tracking-caption);
-}
+/* Traffic lights keep the library's 12px dot / 8px gap. The right padding is
+   the same --topbar-gap that separates every capsule in the row. */
+.window-chrome__lights { display: flex; align-items: center; height: 100%; padding: 0 var(--topbar-gap, 16px) 0 0; }
+.window-chrome__drag { display: none; }
 .window-chrome__fallback { display: flex; align-items: center; gap: var(--s-1, 2px); }
 .window-chrome__fallback button {
   display: grid;

@@ -13,9 +13,12 @@
 </head>
 <body>
   <div id="wallpaper" aria-hidden="true"></div>
-  <div id="window-chrome" hidden></div>
   <div id="app" class="shell">
-    <header class="chrome" id="chrome"></header>
+    <div class="topbar" id="topbar">
+      <div id="window-chrome" hidden data-tauri-drag-region="deep"></div>
+      <header class="chrome" id="chrome" data-tauri-drag-region="deep"></header>
+    </div>
+    <div class="c-topveil" id="topveil" data-on="0" aria-hidden="true"></div>
     <aside class="rail" id="rail" aria-label="仓库导航"></aside>
     <div id="rail-grip"></div>
     <main class="workspace" id="workspace" aria-label="工作区"></main>

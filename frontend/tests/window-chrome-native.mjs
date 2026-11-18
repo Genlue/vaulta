@@ -142,10 +142,15 @@ try {
   assert.equal(lightsState.gap, '8px');
   const start = await get(`(() => {
     window.testTrafficLights = ${lights};
-    const a = ${home}.getBoundingClientRect(), b = document.querySelector('#app').getBoundingClientRect();
-    return { noOverlap: Math.abs(a.bottom - b.top) < 1, noClipping: b.bottom <= innerHeight + 1, bottom: b.bottom, width: innerWidth, height: innerHeight };
+    const lights = ${lights}.getBoundingClientRect();
+    const toggle = document.querySelector('.brand-slot .c-capsule')?.getBoundingClientRect();
+    const app = document.querySelector('#app').getBoundingClientRect();
+    const center = r => (r.top + r.bottom) / 2;
+    return { sameRow: !!toggle && Math.abs(center(lights) - center(toggle)) < 1,
+      inside: lights.left >= 0 && lights.right <= innerWidth,
+      noClipping: app.bottom <= innerHeight + 1, width: innerWidth, height: innerHeight };
   })()`);
-  assert.ok(start.noOverlap && start.noClipping, JSON.stringify(start));
+  assert.ok(start.sameRow && start.inside && start.noClipping, JSON.stringify(start));
   await get(`${light('zoom')}.click()`);
   await wait(`(async () => (await ${ipcState}).maximized && ${light('zoom')}.title === '还原' && ${lights}.dataset.maximized === '1')()`);
   assert.equal(await get(`window.testTrafficLights === ${lights}`), true);
@@ -155,13 +160,13 @@ try {
 
   // A single press routes through Tauri's drag path. CDP doesn't move the
   // system cursor, so this tests hit targeting and IPC authorization, not distance.
-  const drag = `${home}.querySelector('[data-tauri-drag-region=""]')`;
+  const drag = `document.querySelector('.brand[data-tauri-drag-region]')`;
   assert.equal(await get(`(() => {
     const target = ${drag};
     const box = target.getBoundingClientRect();
     const hit = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
     const event = new MouseEvent('mousedown', {button: 0, detail: 1, bubbles: true, composed: true, cancelable: true});
-    return hit === target && !hit.dispatchEvent(event);
+    return !!hit?.closest('.brand') && !hit.dispatchEvent(event);
   })()`), true);
   await get(`__TAURI__.core.invoke('plugin:window|start_dragging')`);
   await get(`${drag}.dispatchEvent(new MouseEvent('mousedown', {button: 0, detail: 2, bubbles: true, composed: true, cancelable: true}))`);

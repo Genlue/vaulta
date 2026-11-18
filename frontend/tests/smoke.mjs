@@ -128,12 +128,21 @@ try {
   await wait(text('还没有仓库')); await wait(text('工作区就绪')); await wait(exists('#glass-defs svg'));
   await wait(exists('#chrome [data-gd-widget=toolbar][data-gd-mounted] .c-topbar'));
   assert.ok(await get(`document.querySelectorAll('#chrome [data-gd-widget=capsule][data-gd-mounted] .c-capsule').length >= 3`));
+  assert.equal(await get(`getComputedStyle(document.querySelector('.chrome')).backgroundColor`), 'rgba(0, 0, 0, 0)');
+  assert.ok(await get(`!!document.querySelector('#topveil.c-topveil')`));
   const optic = await get(`getComputedStyle(document.querySelector('#chrome .c-capsule--round')).backdropFilter`);
   assert.match(optic, /blur.*saturate/);
   if (await get(`CSS.supports('backdrop-filter','url(#gd-glass-capsule-34)')`)) assert.match(optic, /gd-glass-capsule-34/);
   await shot('01-home');
   await click(action('new-vault')); await click(action('pick-folder')); await set('#modal input[name=name]', '设计素材'); await submit(); await close();
   await click(action('nav','inbox')); await wait(exists('.asset-row')); assert.equal(await get('document.querySelectorAll(".asset-row").length'),4);
+  // Back/forward capsule drives the same view state as direct navigation.
+  await click(action('nav','all')); await wait(`document.querySelector('h1').textContent === '资料库'`);
+  await wait(`!document.querySelector('[data-act=history-back]').disabled`);
+  await click(action('history-back')); await wait(`document.querySelector('h1').textContent === '收件箱'`);
+  await wait(`!document.querySelector('[data-act=history-forward]').disabled`);
+  await click(action('history-forward')); await wait(`document.querySelector('h1').textContent === '资料库'`);
+  await click(action('history-back')); await wait(`document.querySelector('h1').textContent === '收件箱'`);
   await get(`[...document.querySelectorAll('.asset-row')].find(n=>n.textContent.includes('界面方案.md')).click()`);
   // A plain click previews the file; metadata lives behind the 信息 tab.
   await wait(text('设计构想'));
@@ -235,8 +244,10 @@ try {
   await get(`document.querySelector('.asset-row').click()`);
   await wait(`!document.querySelector('#inspector').hidden`);
   await cdp('Emulation.setDeviceMetricsOverride', { width: 900, height: 570, deviceScaleFactor: 1, mobile: false });
-  await get(`document.querySelector('#stage').scrollTop=480`);
-  assert.deepEqual(await get(`(()=>{const stage=document.querySelector('#stage'), th=document.querySelector('thead th'), r=th.getBoundingClientRect(), s=stage.getBoundingClientRect(); const rowPoint=document.elementFromPoint(r.left+45, r.bottom+4); return {gap:r.top-s.top, head:!!document.elementFromPoint(r.left+8,r.top+6)?.closest('thead'), row:!!rowPoint?.closest('tbody tr'), noOverflow:stage.scrollWidth===stage.clientWidth}})()`), { gap: 0, head: true, row: true, noOverflow: true });
+  await get(`document.querySelector('#stage').scrollTop=480`); await pause(320);
+  assert.equal(await get(`getComputedStyle(document.querySelector('#topveil')).opacity`), '1');
+  assert.equal(await get(`getComputedStyle(document.querySelector('.asset-stage')).paddingLeft`), '0px');
+  assert.deepEqual(await get(`(()=>{const stage=document.querySelector('#stage'), th=document.querySelector('thead th'), r=th.getBoundingClientRect(), s=stage.getBoundingClientRect(); const rowPoint=document.elementFromPoint(r.left+45, r.bottom+4); return {gap:r.top-s.top, head:!!document.elementFromPoint(r.left+8,r.top+6)?.closest('thead'), row:!!rowPoint?.closest('tbody tr'), noOverflow:stage.scrollWidth===stage.clientWidth}})()`), { gap: 52, head: true, row: true, noOverflow: true });
   await shot('07-compact-sticky');
   const startGrip = await get(`(()=>{const rail=document.querySelector('#rail'), grip=document.querySelector('#rail-grip [role=separator]'), a=grip.getBoundingClientRect();return {x:Math.round(a.left+a.width/2),y:Math.round(a.top+a.height/2),width:rail.offsetWidth};})()`);
   const { x, y, width } = startGrip;
@@ -254,7 +265,9 @@ try {
   await click(action('toggle-rail')); await wait(`document.querySelector('#rail').offsetWidth === ${width + grow - 8}`);
   await shot('11-resized-sidebar');
 
-  await click(action('nav','settings')); await click('.c-select button[aria-label="配色方案"]'); await clickText('.c-menu[data-state=open] .c-menu__item', '深色'); await wait(`document.documentElement.dataset.theme === 'dark'`); await shot('08-dark');
+  await click(action('nav','settings'));
+  await click('.c-select button[aria-label="配色方案"]'); await clickText('.c-menu[data-state=open] .c-menu__item', '浅色'); await wait(`document.documentElement.dataset.theme === 'light'`); await shot('08-light');
+  await click('.c-select button[aria-label="配色方案"]'); await clickText('.c-menu[data-state=open] .c-menu__item', '深色'); await wait(`document.documentElement.dataset.theme === 'dark'`); await shot('08-dark');
   await cdp('Emulation.setEmulatedMedia', { features: [{ name:'prefers-reduced-motion',value:'reduce' }] });
   await click(action('nav','marking')); await wait(exists('.mark-segments .c-seg__ind'));
   await click(segment('mark-mode','marked'));

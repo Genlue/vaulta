@@ -15,6 +15,7 @@ const systemTheme = matchMedia('(prefers-color-scheme: dark)');
 const setTheme = () => { document.documentElement.dataset.theme = prefs.theme === 'system' ? (systemTheme.matches ? 'dark' : 'light') : prefs.theme; };
 setTheme(); systemTheme.addEventListener('change', setTheme);
 const clearFilters = () => ({ category: '', tags: [], flags: [], type: '' });
+const viewHistory = { stack: [], index: -1, lock: false };
 const S = { registry: [], cache: new Map(), id: null, page: 'home', facet: '', folder: '', filters: clearFilters(), selected: new Set(), anchor: null, multi: false,
   markingLoading: false, markingErrors: new Map(), markMode: 'pending', review: false, reviewing: false, viewId: null, pane: true, tab: 'details', rail: true, items: [], byKey: new Map(), limit: 160, sort: 'name', direction: 'asc',
   edited: null, preview: null, previewToken: 0, loading: false, actionBusy: false, booting: true, error: '', notice: '',
@@ -99,6 +100,7 @@ function render({ keepScroll = true } = {}) {
   if (S.batch?.dataset.location === `${S.id}:${S.page}`) { ($('#stage > .asset-intro') || $('#stage'))?.prepend(S.batch); mount(S.batch); }
   syncSelectAll();
   if (keepScroll) [$('#stage'), $('#rail-scroll'), $('#inspect-scroll')].forEach((e, i) => { if (e) e.scrollTop = scrolling[i]; });
+  attachVeil();
   if (searchFocused) { const input = $('#query'); input?.focus({ preventScroll: true }); if (input && document.activeElement === input && cursor[0] != null) input.setSelectionRange(...cursor); }
   else if (focusData) [...document.querySelectorAll(focusSelector)].find(e => e.dataset.asset === focusData || e.dataset.assetCheck === focusData)?.focus({ preventScroll: true });
   else if (focusRegion && focusedSegment && !prev.isConnected) {
@@ -107,18 +109,78 @@ function render({ keepScroll = true } = {}) {
     target?.focus({ preventScroll: true });
   } else if (focusRegion && focusAction[0] && !prev.isConnected) [...focusRegion.querySelectorAll('[data-act]')].find(e => e.dataset.act === focusAction[0] && e.dataset.value === focusAction[1])?.focus({ preventScroll: true });
 }
+let veilStage = null;
+function attachVeil() {
+  const stage = $('#stage'), veil = $('#topveil');
+  if (!stage || !veil) return;
+  if (veilStage !== stage) {
+    veilStage = stage;
+    stage.addEventListener('scroll', () => { veil.dataset.on = stage.scrollTop > 2 ? '1' : '0'; }, { passive: true });
+  }
+  veil.dataset.on = stage.scrollTop > 2 ? '1' : '0';
+}
 // Preserve the live SearchField on results/scan redraws. Recreate it only when
 // the host actually replaces the query; this also preserves an IME composition.
-const capsule = (contents, className, size = 'auto') => widget('capsule', { size }, { className, fallback: contents, tag: 'div' });
+const capsule = (contents, className, size = 'auto', variant = '') => widget('capsule', { size, ...(variant ? { className: variant } : {}) }, { className, fallback: contents, tag: 'div' });
+const viewState = () => ({ id: S.id, page: S.page, facet: S.facet, folder: S.folder, filters: structuredClone(S.filters), viewId: S.viewId, sort: S.sort, direction: S.direction, markMode: S.markMode });
+const sameView = (a, b) => !!a && !!b && a.id === b.id && a.page === b.page && a.facet === b.facet && a.folder === b.folder
+  && a.viewId === b.viewId && a.sort === b.sort && a.direction === b.direction && a.markMode === b.markMode
+  && JSON.stringify(a.filters) === JSON.stringify(b.filters);
+function paintNavPair() {
+  const slot = $('#navpair-slot');
+  if (!slot) return;
+  if (!slot.querySelector('[data-act="history-back"]')) {
+    redraw(slot, capsule(
+      `<button type="button" class="c-navpair__btn" data-act="history-back" aria-label="后退" title="后退（Alt+←）">${icon('chevron-left', 17)}</button><span class="c-navpair__sep"></span><button type="button" class="c-navpair__btn" data-act="history-forward" aria-label="前进" title="前进（Alt+→）">${icon('chevron-right', 17)}</button>`,
+      'navpair-glass', 'auto', 'c-capsule--nav'));
+  }
+  const back = slot.querySelector('[data-act="history-back"]'), forward = slot.querySelector('[data-act="history-forward"]');
+  if (back) back.disabled = viewHistory.index <= 0;
+  if (forward) forward.disabled = viewHistory.index >= viewHistory.stack.length - 1;
+}
+function recordView() {
+  if (viewHistory.lock || !S.id || S.page === 'search') return paintNavPair();
+  const next = viewState(), current = viewHistory.stack[viewHistory.index];
+  if (sameView(next, current)) return paintNavPair();
+  viewHistory.stack = viewHistory.stack.slice(0, viewHistory.index + 1);
+  viewHistory.stack.push(next);
+  if (viewHistory.stack.length > 60) viewHistory.stack.shift();
+  viewHistory.index = viewHistory.stack.length - 1;
+  paintNavPair();
+}
+async function goHistory(delta) {
+  const next = viewHistory.index + delta;
+  if (viewHistory.lock || next < 0 || next >= viewHistory.stack.length) return;
+  const entry = viewHistory.stack[next];
+  if (!getVault(entry.id)) return toast('这个仓库已不可用。', 'warn');
+  viewHistory.index = next; viewHistory.lock = true;
+  try {
+    if (entry.id !== S.id) {
+      S.id = entry.id; persist('active', entry.id); S.dup = null; S.dupToken++;
+      await loadSnapshot(entry.id, false);
+    }
+    S.page = entry.page; S.facet = entry.facet; S.folder = entry.folder;
+    S.filters = structuredClone(entry.filters); S.viewId = entry.viewId;
+    S.sort = entry.sort; S.direction = entry.direction; S.markMode = entry.markMode;
+    S.query = ''; S.searchToken++; S.searchItems = []; S.searchOrigin = null;
+    S.review = false; S.error = ''; S.limit = 160;
+    clearSelection();
+    render({ keepScroll: false });
+    if (S.page === 'duplicates') void getDuplicates();
+    if (S.page === 'marking') void loadMarking();
+    if (S.page === 'settings') void readApi();
+  } catch (error) { toast(msg(error), 'error'); }
+  finally { viewHistory.lock = false; paintNavPair(); }
+}
 function renderChromeInto() {
   if (!$('#search-form')) {
-    const shell = `<div class="brand-slot">${capsule('<div id="rail-toggle"></div>', 'chrome-round', 'round')}<div class="brand" aria-label="vaulta"><img src="./assets/vaulta.png" alt=""><span>vaulta</span></div></div>
-      <div class="chrome-main"><div class="vault-loc"></div>
+    const shell = `<div class="brand-slot">${capsule('<div id="rail-toggle"></div>', 'chrome-round', 'round')}<div class="brand" aria-label="vaulta" data-tauri-drag-region="deep"><img src="./assets/vaulta.png" alt=""><span>vaulta</span></div></div>
+      <div class="chrome-main"><div class="chrome-lead"><div id="navpair-slot"></div><div class="vault-loc"></div></div>
       ${capsule('<form class="searchbar" id="search-form" role="search"><span id="query-slot"></span><kbd title="聚焦搜索">Ctrl K</kbd><div id="query-scope"></div></form>', 'search-glass')}
       ${capsule('<div class="chrome-actions"></div>', 'actions-glass')}</div>`;
     redraw(chrome, widget('toolbar', {}, { fallback: shell, tag: 'div', className: 'vaulta-toolbar' }));
-    // Vaulta has a dedicated native or custom title strip; the search toolbar
-    // is never a drag (or double-click-to-maximize) region.
+    // The brand and the gaps in the capsule row are the drag region; the search
+    // field and every capsule control stay clickable.
     chrome.querySelector('.c-topbar')?.removeAttribute('data-tauri-drag-region');
   }
   redraw($('#rail-toggle'), ib(S.rail ? '隐藏侧栏' : '显示侧栏', 'toggle-rail', 'panel-left', { attrs: `aria-expanded="${S.rail}"` }));
@@ -131,6 +193,7 @@ function renderChromeInto() {
   }
   redraw($('#query-scope'), searchPicker({ disabled, compact: true }));
   redraw($('.chrome-actions'), `${ib('快捷指令 · Ctrl+Shift+P', 'command-palette', 'list-filter', { attrs: 'aria-keyshortcuts="Control+Shift+P" aria-haspopup="dialog"' })}${!configurationPage() ? ib(S.pane ? '关闭自动详情' : '启用自动详情', 'toggle-pane', 'panel-right', { attrs: `aria-pressed="${S.pane}"` }) : ''}`);
+  paintNavPair();
 }
 const railMin = 190, railDefault = 224, railMax = 340;
 function railLimit() { return Math.min(railMax, Math.max(railMin, innerWidth - 620)); }
@@ -336,6 +399,8 @@ function commandsForContext() {
   const current = one();
   const cmd = (label, glyph, action, value, group = '工作区', hint = '', keywords = '') => ({ label, glyph, action, value, group, hint, keywords });
   return [
+    ...(viewHistory.index > 0 ? [cmd('后退', 'chevron-left', 'history-back', null, '导航', 'Alt+←')] : []),
+    ...(viewHistory.index < viewHistory.stack.length - 1 ? [cmd('前进', 'chevron-right', 'history-forward', null, '导航', 'Alt+→')] : []),
     ...(S.registry.length ? [cmd('打开待标记', 'flag', 'nav', 'marking', '待办', '查看所有仓库中还没有标记的资产')] : []),
     ...(vault() ? [cmd('打开收件箱', 'inbox', 'nav', 'inbox', '浏览', '', 'inbox'), cmd('浏览文件', 'folder-tree', 'nav', 'physical', '浏览', '', 'folder tree 目录 物理'), cmd('打开资料库', 'bookmark', 'nav', 'all', '浏览', '', 'library all assets 全部'), cmd('最近使用', 'clock', 'nav', 'recent', '浏览'),
       cmd('查找重复文件', 'copy', 'nav', 'duplicates', '整理'), cmd('扫描当前仓库', 'refresh-cw', 'rescan', null, '整理', 'F5', 'scan'), cmd('查看操作历史', 'clock', 'nav', 'history', '整理')] : []),
@@ -758,6 +823,7 @@ function nav(page, opts = {}) {
   render({ keepScroll: false });
   if (page === 'duplicates') void getDuplicates();
   if (page === 'settings') void readApi();
+  recordView();
 }
 async function switchVault(id, page = 'physical', folder = '') {
   if (!getVault(id)) return;
@@ -1198,6 +1264,8 @@ async function action(name, value, node) {
   if (modal.open && modalController?.active && node?.closest('#modal')) return;
   switch (name) {
     case 'nav': if (value === 'marking' && S.page !== 'marking') S.markMode = 'pending'; return nav(value);
+    case 'history-back': return goHistory(-1);
+    case 'history-forward': return goHistory(1);
     case 'library-mode': return nav(value);
     case 'rail-resize': return resizeRail(value);
     case 'mark-mode':
@@ -1405,6 +1473,7 @@ document.addEventListener('keydown', e => {
   }
   if (ctrl && e.shiftKey && key.toLowerCase() === 'p') { e.preventDefault(); showCommands(); return; }
   if (ctrl && key.toLowerCase() === 'k') { e.preventDefault(); $('#query')?.focus(); $('#query')?.select(); return; }
+  if (e.altKey && (key === 'ArrowLeft' || key === 'ArrowRight')) { e.preventDefault(); void goHistory(key === 'ArrowLeft' ? -1 : 1); return; }
   if (e.target.closest('input,textarea,select,[contenteditable],[role=separator]')) return;
   if (configurationPage()) return;
   const tile = e.target.closest('[data-asset]'), a = tile ? resolveItem(tile.dataset.asset) : one();
