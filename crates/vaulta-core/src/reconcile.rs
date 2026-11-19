@@ -159,7 +159,13 @@ impl Core {
             )
             .optional()?;
         let child_id = match existing {
-            Some(existing) => existing,
+            Some(existing) => {
+                tx.execute(
+                    "UPDATE assets SET kind='unit', state='filed' WHERE id=?1",
+                    [asset_id],
+                )?;
+                existing
+            }
             None => {
                 let nested = tx.query_row(
                     "SELECT EXISTS(SELECT 1 FROM assets WHERE vault_id=?1 AND kind='unit'
@@ -173,7 +179,7 @@ impl Core {
                 let child_id = id();
                 tx.execute("INSERT INTO vaults(id,name,root,root_identity,parent_id,unit_id) VALUES(?1,?2,'',?3,?4,?5)", params![child_id, asset.name, guard.physical.identity, vault_id, asset_id])?;
                 metadata::seed_categories(&tx, &child_id)?;
-                tx.execute("UPDATE assets SET kind='unit' WHERE id=?1", [asset_id])?;
+                tx.execute("UPDATE assets SET kind='unit', state='filed' WHERE id=?1", [asset_id])?;
                 tx.execute("UPDATE assets SET missing=1,shadowed=1 WHERE vault_id=?1 AND substr(path,1,length(?2)+1) = ?2 || '/'", params![vault_id, asset.path])?;
                 invalidate(&tx, vault_id)?;
                 audit(
@@ -315,6 +321,12 @@ impl ScanChanges {
     }
 }
 
+const UPDATE_ENTRY_SQL: &str =
+    "UPDATE assets SET path=?2,size=?3,modified=?4,created=?5,identity=?6,links=?7,missing=0,shadowed=0 WHERE id=?1";
+const UPDATE_MISSING_SQL: &str = "UPDATE assets SET missing=1 WHERE id=?1";
+const INSERT_ASSET_SQL: &str =
+    "INSERT INTO assets(id,vault_id,path,kind,size,modified,created,identity,links,category_id,state) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)";
+
 fn reconcile(db: &Connection, vault: &str, walk: &Walk) -> Result<ScanChanges> {
     let old = indexed(db, vault)?;
     let categories = metadata::category_ids(db, vault)?;
@@ -356,13 +368,10 @@ fn reconcile(db: &Connection, vault: &str, walk: &Walk) -> Result<ScanChanges> {
         }
     }
     if walk.complete {
-        for (j, entry) in walk
-            .entries
-            .iter()
-            .enumerate()
-            .filter(|(j, _)| matches[*j].is_none())
-            .collect::<Vec<_>>()
-        {
+        for (j, entry) in walk.entries.iter().enumerate() {
+            if matches[j].is_some() {
+                continue;
+            }
             let key = entry.physical.identity.as_str();
             if seen_count[key] != 1 || (!entry.physical.directory && entry.physical.links != 1) {
                 continue;
@@ -395,7 +404,7 @@ fn reconcile(db: &Connection, vault: &str, walk: &Walk) -> Result<ScanChanges> {
         }
         for (i, a) in old.iter().enumerate() {
             if !a.missing && (moving.contains(&i) || !used.contains(&i)) {
-                db.execute("UPDATE assets SET missing=1 WHERE id=?1", [&a.id])?;
+                db.prepare_cached(UPDATE_MISSING_SQL)?.execute([&a.id])?;
                 if !used.contains(&i) {
                     out.missing += 1;
                 }
@@ -435,8 +444,19 @@ fn reconcile(db: &Connection, vault: &str, walk: &Walk) -> Result<ScanChanges> {
             // library directly. Files wait in the inbox until the user files
             // them, even when the classifier already named a category.
             let state = if p.directory { "filed" } else { "inbox" };
-            db.execute("INSERT INTO assets(id,vault_id,path,kind,size,modified,created,identity,links,category_id,state) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
-                params![asset_id, vault, entry.path, if p.directory { "directory" } else { "file" }, p.size, p.modified, p.created, p.identity, p.links, category, state])?;
+            db.prepare_cached(INSERT_ASSET_SQL)?.execute(params![
+                asset_id,
+                vault,
+                entry.path,
+                if p.directory { "directory" } else { "file" },
+                p.size,
+                p.modified,
+                p.created,
+                p.identity,
+                p.links,
+                category,
+                state,
+            ])?;
             out.added += 1;
         }
     }
@@ -445,8 +465,15 @@ fn reconcile(db: &Connection, vault: &str, walk: &Walk) -> Result<ScanChanges> {
 
 fn apply_entry(db: &Connection, id: &str, entry: &Entry) -> Result<()> {
     let p = &entry.physical;
-    db.execute("UPDATE assets SET path=?2,size=?3,modified=?4,created=?5,identity=?6,links=?7,missing=0,shadowed=0 WHERE id=?1",
-        params![id, entry.path, p.size, p.modified, p.created, p.identity, p.links])?;
+    db.prepare_cached(UPDATE_ENTRY_SQL)?.execute(params![
+        id,
+        entry.path,
+        p.size,
+        p.modified,
+        p.created,
+        p.identity,
+        p.links,
+    ])?;
     Ok(())
 }
 

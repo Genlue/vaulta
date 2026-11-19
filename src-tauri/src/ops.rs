@@ -199,10 +199,11 @@ fn view_data(snapshot: &Snapshot) -> Result<Projection> {
 }
 
 pub fn sync_projection(core: &mut Core, id: &str, import: bool) -> Result<Vec<String>> {
-    let initial = core.snapshot(id)?;
-    if !initial.vault.view_enabled && !initial.vault.root.join(".vaulta-views").exists() {
+    let vault = core.get_vault(id)?;
+    if !vault.view_enabled && !vault.root.join(".vaulta-views").exists() {
         return Ok(Vec::new());
     }
+    let initial = core.snapshot(id)?;
     let root = core.checked_root(id)?;
     let data = view_data(&initial)?;
     let enabled = initial.vault.view_enabled;

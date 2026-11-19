@@ -3,6 +3,7 @@ mod filesystem;
 mod metadata;
 mod model;
 mod reconcile;
+mod relocation;
 
 pub use filesystem::identity;
 pub use model::{Asset, Category, History, Mutation, Snapshot, Vault};

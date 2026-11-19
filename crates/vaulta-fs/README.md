@@ -17,8 +17,10 @@ saving, searching, hashing, or projecting categories.
   unchanged. Do not blindly retry a completed disk operation after a reconciliation error.
 - Preview is bounded to 2 MiB for UTF-8 text and 12 MiB for supported raster/audio/video files.
   Render its text as a text node, never HTML, including Markdown and HTML source. Only bind the
-  returned media URLs to the corresponding image/audio/video element. `text_matches` uses this
-  text reader only. Duplicate groups are identified by size and streamed SHA-256 of the unnamed
+  returned media URLs to the corresponding image/audio/video element. For PDF and supported
+  Office-family documents, `preview` returns only a renderer kind; `open_render_source` verifies
+  the file identity and exposes bounded bytes (up to 64 MiB) for the desktop host. Document text
+  extraction is exclusive to `text_matches`. Duplicate groups are identified by size and streamed SHA-256 of the unnamed
   stream, not used as file identity, and never trigger merging or deletion.
 - `save_text_verified_checked` atomically commits content using a Windows TxF-capable filesystem,
   comparing content revision, native identity, and single-link state while handles are open. It

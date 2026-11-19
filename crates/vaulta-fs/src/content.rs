@@ -6,7 +6,7 @@ use std::{
     fs::File,
     io::{self, Read, Seek, Write},
     os::windows::io::FromRawHandle,
-    path::Path,
+    path::{Path, PathBuf},
 };
 use windows::{
     core::PCWSTR,
@@ -173,7 +173,94 @@ fn read_document(
     Ok(bytes(file, path, document_text::MAX_INPUT)?.and_then(|data| format.extract(&data)))
 }
 
-/// Inert UTF-8 source, read-only extracted text, or bounded raster/audio/video.
+const MAX_RENDER_BYTES: usize = 64 * 1024 * 1024;
+
+fn render_kind(ext: &str) -> Option<PreviewKind> {
+    Some(match ext {
+        "pdf" => PreviewKind::Pdf,
+        "pptx" | "ppsx" => PreviewKind::Slides,
+        "doc" | "docx" | "rtf" | "odt" | "ppt" | "pps" | "odp" | "xls"
+        | "xlsx" | "ods" => PreviewKind::Office,
+        _ => return None,
+    })
+}
+
+/// A bounded, verified document. Renderers never receive an arbitrary path from the UI.
+pub struct RenderSource(Asset);
+
+impl RenderSource {
+    pub fn extension(&self) -> String {
+        extension(&self.0.path)
+    }
+
+    pub fn into_bytes(self) -> Result<Vec<u8>> {
+        bytes(&self.0.file, &self.0.path, MAX_RENDER_BYTES)?
+            .ok_or(Error::Unsupported("document preview is limited to 64 MiB"))
+    }
+
+    pub fn revision(&self) -> Result<(String, u64, std::time::SystemTime)> {
+        let asset = &self.0;
+        let meta = asset
+            .file
+            .metadata()
+            .map_err(|e| io_error("inspect document", &asset.path, e))?;
+        let modified = meta
+            .modified()
+            .map_err(|e| io_error("inspect document modification time", &asset.path, e))?;
+        Ok((
+            identity_key(&asset.file, &asset.path)?,
+            meta.len(),
+            modified,
+        ))
+    }
+
+    pub fn has_zone_marker(&self) -> io::Result<bool> {
+        Ok(self.open_zone_marker()?.is_some())
+    }
+
+    /// Read the alternate stream while the original and its parent paths are pinned.
+    pub fn open_zone_marker(&self) -> io::Result<Option<File>> {
+        let mut stream = self.0.path.as_os_str().to_os_string();
+        stream.push(":Zone.Identifier:$DATA");
+        match File::open(PathBuf::from(stream)) {
+            Ok(file) => Ok(Some(file)),
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound
+                    || matches!(error.raw_os_error(), Some(1 | 123)) =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+pub fn open_render_source(
+    root: &Path,
+    rel: &str,
+    expected_identity: &str,
+    kind: PreviewKind,
+) -> Result<RenderSource> {
+    let asset = Asset::open(root, rel, FILE_GENERIC_READ.0, FILE_SHARE_READ)?;
+    verify(&asset.file, &asset.path, Some(expected_identity))?;
+    if asset.is_dir || render_kind(&extension(&asset.path)) != Some(kind) {
+        return Err(Error::Unsupported("not a supported document format"));
+    }
+    if render_size(&asset)? > MAX_RENDER_BYTES as u64 {
+        return Err(Error::Unsupported("document preview is limited to 64 MiB"));
+    }
+    Ok(RenderSource(asset))
+}
+
+fn render_size(asset: &Asset) -> Result<u64> {
+    Ok(asset
+        .file
+        .metadata()
+        .map_err(|e| io_error("inspect document", &asset.path, e))?
+        .len())
+}
+
+/// Inert UTF-8 source, native document routing, or bounded raster/audio/video.
 pub fn preview(root: &Path, rel: &str) -> Result<Preview> {
     if rel.is_empty() {
         Dir::absolute(root)?;
@@ -198,16 +285,11 @@ pub fn preview(root: &Path, rel: &str) -> Result<Preview> {
         return Ok(result);
     }
     let ext = extension(&asset.path);
-    if let Some(format) = document_text::Format::from_extension(&ext) {
-        return Ok(match read_document(&asset.file, &asset.path, format)? {
-            Some(text) => Preview {
-                text: Some(text),
-                mime: Some("text/plain".into()),
-                ..preview_of(PreviewKind::Text) // No revision: never editable.
-            },
-            None => {
-                unsupported("No text available within the supported document formats and limits.")
-            }
+    if let Some(kind) = render_kind(&ext) {
+        return Ok(if render_size(&asset)? > MAX_RENDER_BYTES as u64 {
+            unsupported("文档预览上限为 64 MiB。")
+        } else {
+            preview_of(kind)
         });
     }
     if let Some((kind, mime)) = media_type(&ext) {

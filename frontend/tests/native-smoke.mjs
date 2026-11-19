@@ -2,7 +2,7 @@
 // Release builds intentionally leave DevTools disabled.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
+import { copyFile, mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,6 +13,27 @@ const temp = await mkdtemp(join(tmpdir(), 'vaulta-native-'));
 const vaultRoot = join(temp, 'fixture');
 await mkdir(vaultRoot);
 await writeFile(join(vaultRoot, 'note.md'), '# Native preview\n真实文件验证');
+// A two-page, image-only PDF. The very small embedded RGB image is scaled to fill
+// the first page. An extractor cannot return any text from either page.
+function imagePdf() {
+  const commands = ['q 200 0 0 300 0 0 cm /Im0 Do Q', '0 .3 .67 rg 0 0 200 300 re f'];
+  const objects = [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 300] /Resources << /XObject << /Im0 7 0 R >> >> /Contents 5 0 R >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 300] /Resources << >> /Contents 6 0 R >>',
+    ...commands.map(c => `<< /Length ${c.length} >>\nstream\n${c}\nendstream`),
+    '<< /Type /XObject /Subtype /Image /Width 2 /Height 1 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length 13 /Filter /ASCIIHexDecode >>\nstream\nEC57304EBD8F>\nendstream',
+  ];
+  let pdf = '%PDF-1.4\n', offsets = [];
+  for (const object of objects) { offsets.push(pdf.length); pdf += `${offsets.length} 0 obj\n${object}\nendobj\n`; }
+  const xref = pdf.length;
+  return pdf + `xref\n0 ${offsets.length + 1}\n0000000000 65535 f \n${offsets.map(n => `${String(n).padStart(10, '0')} 00000 n \n`).join('')}trailer\n<< /Size ${offsets.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+}
+const officeFixtures = process.env.VAULTA_PREVIEW_FIXTURES;
+const slideFixture = fileURLToPath(new URL('../../scripts/fixtures/preview-slides.pptx', import.meta.url));
+const zoneMarker = '[ZoneTransfer]\r\nZoneId=3\r\n';
+const officeFiles = officeFixtures ? ['word.docx', 'grid.xlsx'] : [];
 // The debug-only TAURI_CONFIG in the frontend README enables this port.
 const port = Number(process.env.VAULTA_NATIVE_TEST_PORT || 39377);
 const inUse = await fetch(`http://127.0.0.1:${port}/json/list`).then(() => true).catch(() => false);
@@ -65,7 +86,7 @@ try {
   await get(`document.querySelector('.vault-card [data-act=switch]').click()`);
   await wait(`!!document.querySelector('.asset-row')`);
   await get(`document.querySelector('#rail [data-value=inbox]').click()`);
-  await wait(`!!document.querySelector('.asset-row') && document.querySelector('.asset-row').textContent.includes('note.md')`);
+  await wait(`Array.from(document.querySelectorAll('.asset-row')).some(r => r.textContent.includes('note.md'))`);
   await get(`document.querySelector('[data-act=review-start]').click()`);
   await wait(`document.querySelector('.preview-pane')?.textContent.includes('真实文件验证')`);
   assert.ok(await get(`!!document.querySelector('.review-band .c-card')`));
@@ -73,15 +94,97 @@ try {
   await wait(`document.querySelector('.review-band')?.textContent.includes('当前视图没有待处理项目')`);
   const snapshot = await get(`__TAURI__.core.invoke('snapshot', {vaultId:${JSON.stringify(created.id)}})`);
   assert.equal(snapshot.assets.find(a => a.name === 'note.md')?.state, 'filed');
-  await get(`document.querySelector('#rail [data-value=marking]').click()`);
-  await wait(`document.querySelector('.mark-counts')?.textContent.startsWith('1 待标记')`);
+  await get(`document.querySelector('#rail [data-value=all]').click()`);
+  await wait(`Array.from(document.querySelectorAll('.asset-row')).some(r => r.textContent.includes('note.md'))`);
   await get(`document.querySelector('#items .asset-mark').click()`);
   await wait(`!!document.querySelector('#modal[open] input[name="chosen-mark"][value="已核对"]')`);
   await get(`document.querySelector('#modal [value="已核对"]').click(); document.querySelector('#dialog-form').requestSubmit()`);
-  await wait(`!document.querySelector('#modal').open && document.querySelector('.mark-counts').textContent.startsWith('0 待标记')`);
+  await wait(`!document.querySelector('#modal').open && document.querySelector('#items .asset-mark.is-marked')`);
   const marked = await get(`__TAURI__.core.invoke('snapshot', {vaultId:${JSON.stringify(created.id)}})`);
   assert.deepEqual(marked.assets.find(a => a.name === 'note.md')?.flags, ['已核对']);
   assert.equal(marked.assets.find(a => a.name === 'note.md')?.state, 'filed');
+  await writeFile(join(vaultRoot, 'scan.pdf'), imagePdf());
+  await writeFile(join(vaultRoot, 'broken.pdf'), '%PDF-1.4\nnot a real document');
+  for (const name of officeFiles) await copyFile(join(officeFixtures, name), join(vaultRoot, name));
+  if (officeFixtures) {
+    for (const name of ['slides.pptx', 'downloaded.pptx']) await copyFile(slideFixture, join(vaultRoot, name));
+    await writeFile(join(vaultRoot, 'downloaded.pptx:Zone.Identifier'), zoneMarker);
+    await copyFile(join(officeFixtures, 'word.docx'), join(vaultRoot, 'downloaded.docx'));
+    await writeFile(join(vaultRoot, 'downloaded.docx:Zone.Identifier'), zoneMarker);
+  }
+  await get(`document.querySelector('#rail [data-value=inbox]').click()`);
+  const clickFile = async name => {
+    const row = `Array.from(document.querySelectorAll('#items .asset-row')).find(r=>r.querySelector('.asset-name')?.title===${JSON.stringify(name)} || r.querySelector('.asset-name')?.textContent.trim()===${JSON.stringify(name)} || r.textContent.includes(${JSON.stringify(name)}))`;
+    await wait(`!!(${row})`); await get(`(${row}).click()`);
+  };
+  await clickFile('scan.pdf');
+  await wait(`document.querySelector('.pdf-page img')?.naturalHeight > 0`);
+  const pixel = `(() => { const image = document.querySelector('.pdf-page img'); const c = document.createElement('canvas'); c.width=10;c.height=10; const ctx = c.getContext('2d'); ctx.drawImage(image,0,0,10,10);return [...ctx.getImageData(2,2,1,1).data]; })()`;
+  const first = await get(pixel);
+  assert.ok(first[0] > 190 && first[1] < 130, `First page should show the embedded orange image: ${first}`);
+  await get(`document.querySelector('[data-act=pdf-view][data-value=next]').click()`);
+  await wait(`document.querySelector('.pdf-page-label')?.textContent === '2 / 2' && document.querySelector('.pdf-page img')?.naturalHeight > 0`);
+  const second = await get(pixel);
+  assert.ok(second[2] > 130 && second[0] < 10, `Second page should be blue: ${second}`);
+  await clickFile('broken.pdf');
+  await wait(`document.querySelector('.preview-message [data-act=retry-preview]') && document.querySelector('.preview-message [data-act=open-asset]')`);
+  for (const name of officeFiles) {
+    await clickFile(name);
+    await wait(`!!document.querySelector('.office-preview-surface:not([aria-busy]), .preview-message [data-act=retry-preview]')`);
+    assert.ok(await get(`!!document.querySelector('.office-preview-surface:not([aria-busy])')`), await get(`document.querySelector('.preview-pane')?.innerText`));
+    assert.deepEqual(await readFile(join(vaultRoot, name)), await readFile(join(officeFixtures, name)));
+  }
+  if (officeFixtures) {
+    const assertSlide = async (page, color) => {
+      await wait(`(document.querySelector('.pdf-page-label')?.textContent === '${page} / 2' && document.querySelector('.pdf-page img')?.naturalHeight > 0) || !!document.querySelector('.preview-message [data-act=retry-preview], .pdf-status[role=alert]')`);
+      assert.equal(await get(`document.querySelector('.pdf-page-label')?.textContent`), `${page} / 2`, await get(`document.querySelector('.preview-pane')?.innerText`));
+      const rgb = await get(pixel);
+      assert.ok(color.every((c, i) => Math.abs(rgb[i] - c) <= 5), `Slide ${page} should paint ${color}, got ${rgb}`);
+    };
+    await clickFile('slides.pptx');
+    await assertSlide(1, [16, 43, 99]);
+    await get(`document.querySelector('[data-act=pdf-view][data-value=next]').click()`);
+    await assertSlide(2, [182, 74, 35]);
+    await get(`document.querySelector('[data-act=pdf-view][data-value=prev]').click()`);
+    await assertSlide(1, [16, 43, 99]);
+    await get(`document.querySelector('[data-act=pdf-view][data-value=toggle-mode]').click()`);
+    await wait(`!document.querySelector('.pdf-flow')`);
+    await get(`document.querySelector('[data-act=pdf-view][data-value=next]').click()`);
+    await assertSlide(2, [182, 74, 35]);
+    await get(`document.querySelector('[data-act=pdf-view][data-value=prev]').click()`);
+    await assertSlide(1, [16, 43, 99]);
+    await get(`document.querySelector('[data-act=pdf-view][data-value=toggle-mode]').click()`);
+    await wait(`!!document.querySelector('.pdf-flow')`);
+    assert.deepEqual(await readFile(join(vaultRoot, 'slides.pptx')), await readFile(slideFixture));
+    await clickFile('downloaded.pptx');
+    const allowOnce = `document.querySelector('[data-act=preview-marked-once]')`;
+    await wait(`!!${allowOnce}`);
+    await get(`${allowOnce}.click()`);
+    await wait(`document.querySelector('#modal[open]')?.textContent.includes('仅本次预览')`);
+    await get(`document.querySelector('#dialog-form').requestSubmit()`);
+    await assertSlide(1, [16, 43, 99]);
+    await get(`document.querySelector('[data-act=pdf-view][data-value=next]').click()`);
+    await assertSlide(2, [182, 74, 35]);
+    assert.deepEqual(await readFile(join(vaultRoot, 'downloaded.pptx')), await readFile(slideFixture));
+    assert.equal(await readFile(join(vaultRoot, 'downloaded.pptx:Zone.Identifier'), 'utf8'), zoneMarker);
+    await clickFile('slides.pptx');
+    await assertSlide(1, [16, 43, 99]);
+    await clickFile('downloaded.pptx');
+    await wait(`!!${allowOnce}`);
+    await clickFile('downloaded.docx');
+    await wait(`!!${allowOnce}`);
+    await get(`${allowOnce}.click()`);
+    await wait(`document.querySelector('#modal[open]')?.textContent.includes('仅本次预览')`);
+    await get(`document.querySelector('#dialog-form').requestSubmit()`);
+    await wait(`!!document.querySelector('.office-preview-surface:not([aria-busy]), .preview-message [data-act=retry-preview]')`);
+    assert.ok(await get(`!!document.querySelector('.office-preview-surface:not([aria-busy])')`), await get(`document.querySelector('.preview-pane')?.innerText`));
+    assert.deepEqual(await readFile(join(vaultRoot, 'downloaded.docx')), await readFile(join(officeFixtures, 'word.docx')));
+    assert.equal(await readFile(join(vaultRoot, 'downloaded.docx:Zone.Identifier'), 'utf8'), zoneMarker);
+    await clickFile('word.docx');
+    await wait(`!!document.querySelector('.office-preview-surface:not([aria-busy])')`);
+    await clickFile('downloaded.docx');
+    await wait(`!!${allowOnce}`);
+  }
   assert.equal(await get(`document.documentElement.dataset.gdError ?? ''`), '');
   assert.deepEqual(errors, []);
   console.log(`Native Tauri/WebView2 smoke passed. Isolated data: ${temp}`);

@@ -45,6 +45,9 @@ pub enum PreviewKind {
     Image,
     Audio,
     Video,
+    Pdf,
+    Office,
+    Slides,
     Unsupported,
     Directory,
 }
@@ -107,8 +110,8 @@ mod view;
 #[cfg(windows)]
 pub use {
     content::{
-        duplicate_groups, preview, save_text, save_text_verified, save_text_verified_checked,
-        text_matches,
+        duplicate_groups, open_render_source, preview, save_text, save_text_verified,
+        save_text_verified_checked, text_matches, RenderSource,
     },
     path::{mkdir, move_asset, move_asset_checked, rename, rename_checked, resolve},
     shell::{open, open_checked, recycle, recycle_checked},

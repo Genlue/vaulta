@@ -17,20 +17,24 @@
     <div class="topbar" id="topbar">
       <div class="topbar-window" data-tauri-drag-region="deep">
         <div id="window-chrome" hidden data-tauri-drag-region="deep"></div>
-        <div id="rail-toggle-slot"></div>
+        <div class="rail-toggle-track">
+          <div id="rail-toggle-slot" data-tauri-drag-region="false"></div>
+        </div>
       </div>
       <header class="chrome" id="chrome" data-tauri-drag-region="deep"></header>
     </div>
     <div class="c-topveil" id="topveil" data-on="0" aria-hidden="true"></div>
     <aside class="rail" id="rail" aria-label="仓库导航"></aside>
     <div id="rail-grip"></div>
+    <nav class="c-dock" id="dock" data-edge="left" aria-label="主导航" hidden></nav>
     <main class="workspace" id="workspace" aria-label="工作区"></main>
+    <div id="inspect-grip" hidden></div>
     <aside class="inspector" id="inspector" aria-label="资产详情" hidden></aside>
     <footer class="status" id="status"></footer>
   </div>
   <dialog id="commands" class="command-dialog" aria-labelledby="commands-title"></dialog>
   <dialog id="modal" class="dialog" aria-labelledby="dialog-title"></dialog>
-  <div id="pop" class="popover c-menu" hidden></div>
+  <div id="pop" class="c-menu" role="menu" tabindex="-1" hidden></div>
   <div id="toasts" class="toasts" aria-live="polite"></div>
   <div id="glass-defs" aria-hidden="true"></div>
 </body>

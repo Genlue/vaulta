@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod document_preview;
 mod ops;
+mod updates;
 mod watcher;
 mod window_chrome;
 
@@ -103,6 +105,26 @@ async fn add_vault(
 }
 
 #[tauri::command]
+async fn relocate_vault(
+    app: AppHandle,
+    state: State<'_, Desktop>,
+    vault_id: String,
+    path: PathBuf,
+) -> Reply<Vault> {
+    let db = state.db.clone();
+    let wake = state.wake.clone();
+    dispatch(&state, move |core| {
+        ensure!(path.is_absolute(), "请选择仓库搬迁后的绝对路径。");
+        ops::prevent_data_overlap(&path, &db)?;
+        let vault = core.relocate_vault(&vault_id, &path)?;
+        let _ = wake.send(watcher::Wake::Relocated(vault_id));
+        changed(&app, "");
+        Ok(vault)
+    })
+    .await
+}
+
+#[tauri::command]
 async fn rename_vault(
     app: AppHandle,
     state: State<'_, Desktop>,
@@ -159,7 +181,6 @@ async fn rescan(app: AppHandle, state: State<'_, Desktop>, vault_id: String) -> 
         if result.is_ok() {
             projection_notice(&app, core, &vault_id, true);
         }
-        changed(&app, &vault_id);
         Ok(result?)
     })
     .await
@@ -483,6 +504,11 @@ async fn set_agent_access(
 fn main() {
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(updates::Updates::default())
+        .manage(document_preview::PdfCache::default())
+        .manage(document_preview::OfficeHost::default())
+        .manage(document_preview::SlidesHost::default())
         .setup(|app| {
             let db = database_path()?;
             let wake = watcher::start(app.handle().clone(), db.clone());
@@ -497,6 +523,7 @@ fn main() {
             list_vaults,
             choose_folder,
             add_vault,
+            relocate_vault,
             rename_vault,
             remove_vault,
             open_unit,
@@ -504,12 +531,19 @@ fn main() {
             rescan,
             mutate,
             preview,
+            document_preview::pdf_preview_page,
+            document_preview::slides_preview_page,
+            document_preview::office_preview_open,
+            document_preview::office::office_preview_layout,
             save_text,
             file_operation,
             create_folder,
             duplicates,
             content_matches,
             api_info,
+            updates::check_update,
+            updates::install_update,
+            updates::open_update_releases,
             agent_access,
             set_agent_access,
             window_chrome::window_chrome_state,

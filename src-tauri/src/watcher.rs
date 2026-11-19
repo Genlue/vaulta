@@ -9,9 +9,11 @@ use std::{
 };
 use tauri::AppHandle;
 use vaulta::locked;
+use vaulta_core::{Core, Vault};
 
 pub enum Wake {
     One(String),
+    Relocated(String),
     Files(notify::Result<Event>),
 }
 const PROBE: Duration = Duration::from_secs(1);
@@ -29,7 +31,7 @@ pub fn start(app: AppHandle, db: PathBuf) -> Sender<Wake> {
                     let _ = events.send(Wake::Files(result));
                 })
                 .ok();
-            let mut watched = HashSet::<PathBuf>::new();
+            let mut watched = HashMap::<PathBuf, String>::new();
             let mut spaces = Vec::<(String, PathBuf)>::new();
             let mut prior = None;
             let mut db_warning = None;
@@ -37,6 +39,7 @@ pub fn start(app: AppHandle, db: PathBuf) -> Sender<Wake> {
             let mut full = Instant::now();
             let mut probe = Instant::now();
             let mut pending = BTreeSet::<String>::new();
+            let mut relocated = BTreeSet::<String>::new();
             let mut scheduled = None;
 
             loop {
@@ -44,6 +47,10 @@ pub fn start(app: AppHandle, db: PathBuf) -> Sender<Wake> {
                 match rx.recv_timeout(next.saturating_duration_since(Instant::now())) {
                     Ok(Wake::One(id)) => {
                         pending.insert(id);
+                        scheduled = Some(Instant::now());
+                    }
+                    Ok(Wake::Relocated(id)) => {
+                        relocated.insert(id);
                         scheduled = Some(Instant::now());
                     }
                     Ok(Wake::Files(Ok(event))) if !event.kind.is_access() => {
@@ -72,10 +79,6 @@ pub fn start(app: AppHandle, db: PathBuf) -> Sender<Wake> {
                 if !(probe_due || full_due || dirty_due) {
                     continue;
                 }
-                probe = now + PROBE;
-                if full_due {
-                    full = now + FULL_SCAN;
-                }
                 let targets = if dirty_due || full_due {
                     scheduled = None;
                     std::mem::take(&mut pending)
@@ -87,14 +90,23 @@ pub fn start(app: AppHandle, db: PathBuf) -> Sender<Wake> {
                     let mut vaults = core.vaults()?;
                     // Parent first, so moved whole units are seen at their new roots when scanned.
                     vaults.sort_by_key(|v| v.root.components().count());
+                    let moved = affected_subtree(&vaults, &relocated);
+                    // Watch the new directory before walking it, so edits during the first
+                    // scan schedule a follow-up scan rather than slipping through a gap.
+                    if !relocated.is_empty() {
+                        rebind(core, &vaults, &mut watcher, &mut watched);
+                    }
                     let before = core.revision()?;
                     let metadata_changed = prior.is_some_and(|previous| previous != before);
                     for v in &vaults {
-                        let scan = full_due || targets.contains(&v.id);
+                        let moved = moved.contains(v.id.as_str());
+                        let scan = full_due || targets.contains(&v.id) || moved;
                         let result = if scan {
                             core.scan(&v.id)
                                 .map_err(anyhow::Error::from)
-                                .and_then(|()| sync_projection(core, &v.id, true))
+                                // Old absolute projection links may be broken by the move.
+                                // Export the existing DB state before accepting disk edits.
+                                .and_then(|()| sync_projection(core, &v.id, !moved))
                         } else if metadata_changed && v.view_enabled {
                             sync_projection(core, &v.id, true)
                         } else {
@@ -116,7 +128,9 @@ pub fn start(app: AppHandle, db: PathBuf) -> Sender<Wake> {
                         changed(&app, "");
                     }
                     prior = Some(after);
-                    Ok(core.vaults()?)
+                    let vaults = core.vaults()?;
+                    rebind(core, &vaults, &mut watcher, &mut watched);
+                    Ok(vaults)
                 });
                 match result {
                     Ok(vaults) => {
@@ -125,27 +139,12 @@ pub fn start(app: AppHandle, db: PathBuf) -> Sender<Wake> {
                             .iter()
                             .map(|v| (v.id.clone(), v.root.clone()))
                             .collect();
-                        if let Some(watcher) = &mut watcher {
-                            let desired: HashSet<_> = vaults
-                                .into_iter()
-                                .filter(|v| v.parent_id.is_none())
-                                .map(|v| v.root)
-                                .filter(|p| p.is_dir())
-                                .collect();
-                            for removed in watched.difference(&desired) {
-                                let _ = watcher.unwatch(removed);
-                            }
-                            watched.retain(|p| desired.contains(p));
-                            for path in desired {
-                                if !watched.contains(&path)
-                                    && watcher.watch(&path, RecursiveMode::Recursive).is_ok()
-                                {
-                                    watched.insert(path);
-                                }
-                            }
-                        }
+                        relocated.clear();
                     }
                     Err(e) => {
+                        if !relocated.is_empty() {
+                            scheduled = Some(Instant::now() + PROBE);
+                        }
                         let message = format!("无法读取本地仓库索引：{e:#}");
                         if db_warning.as_ref() != Some(&message) {
                             warn(&app, "", &message);
@@ -153,10 +152,61 @@ pub fn start(app: AppHandle, db: PathBuf) -> Sender<Wake> {
                         }
                     }
                 }
+                let finished = Instant::now();
+                probe = finished + PROBE;
+                if full_due {
+                    full = finished + FULL_SCAN;
+                }
             }
         })
         .expect("could not spawn vaulta index thread");
     tx
+}
+
+fn affected_subtree<'a>(vaults: &'a [Vault], roots: &BTreeSet<String>) -> HashSet<&'a str> {
+    let mut affected = HashSet::new();
+    // Caller orders the spaces parent-first; a child root is always deeper than its parent.
+    for v in vaults {
+        if roots.contains(&v.id)
+            || v.parent_id
+                .as_deref()
+                .is_some_and(|id| affected.contains(id))
+        {
+            affected.insert(v.id.as_str());
+        }
+    }
+    affected
+}
+
+fn rebind(
+    core: &Core,
+    vaults: &[Vault],
+    watcher: &mut Option<RecommendedWatcher>,
+    watched: &mut HashMap<PathBuf, String>,
+) {
+    let Some(watcher) = watcher else { return };
+    let desired: HashMap<_, _> = vaults
+        .iter()
+        .filter(|v| v.parent_id.is_none() && v.root.is_dir())
+        .map(|v| (v.root.as_path(), v.id.as_str()))
+        .collect();
+    // A different vault may register the vacated path before this thread wakes up.
+    // The old OS watch still follows the moved directory, not the replacement.
+    watched.retain(|path, id| {
+        if desired.get(path.as_path()) == Some(&id.as_str()) {
+            return true;
+        }
+        let _ = watcher.unwatch(path);
+        false
+    });
+    for (path, id) in desired {
+        if !watched.contains_key(path)
+            && core.checked_root(id).is_ok()
+            && watcher.watch(path, RecursiveMode::Recursive).is_ok()
+        {
+            watched.insert(path.to_owned(), id.to_owned());
+        }
+    }
 }
 
 fn below(candidate: &Path, root: &Path) -> bool {

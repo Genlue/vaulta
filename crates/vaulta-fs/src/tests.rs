@@ -435,41 +435,83 @@ fn projection_noop_preserves_manifest_and_checks_target_identity() {
 }
 
 #[test]
-fn document_search_and_preview_share_read_only_text() {
+fn document_search_is_separate_from_binary_preview() {
     use crate::document_text::tests::{pdf_fixture, slide_fixture, word_fixture, workbook_fixture};
     let temp = temp();
     let root = temp.path();
-    for (name, data, query) in [
-        ("word.DOCX", word_fixture(), "VAULTA & 猫"),
-        ("slides.pptx", slide_fixture(), "TENTH SLIDE"),
-        ("book.xlsx", workbook_fixture(), "SHARED LABEL"),
-        ("paper.pdf", pdf_fixture(), "PDF ÉVIDENCE"),
+    for (name, data, query, kind) in [
+        (
+            "word.DOCX",
+            word_fixture(),
+            "VAULTA & 猫",
+            PreviewKind::Office,
+        ),
+        (
+            "slides.pptx",
+            slide_fixture(),
+            "TENTH SLIDE",
+            PreviewKind::Slides,
+        ),
+        (
+            "book.xlsx",
+            workbook_fixture(),
+            "SHARED LABEL",
+            PreviewKind::Office,
+        ),
+        ("paper.pdf", pdf_fixture(), "PDF ÉVIDENCE", PreviewKind::Pdf),
     ] {
-        fs::write(root.join(name), &data).unwrap();
+        let path = root.join(name);
+        fs::write(&path, &data).unwrap();
         assert!(text_matches(root, name, query).unwrap(), "{name}");
         let p = preview(root, name).unwrap();
-        assert_eq!(p.kind, PreviewKind::Text);
-        assert_eq!(p.mime.as_deref(), Some("text/plain"));
-        assert!(p
-            .text
-            .unwrap()
-            .to_lowercase()
-            .contains(&query.to_lowercase()));
-        assert!(p.data_url.is_none() && p.revision.is_none());
+        assert_eq!(p.kind, kind);
+        assert!(p.text.is_none() && p.data_url.is_none() && p.revision.is_none());
+        let asset = crate::path::Asset::open(
+            root,
+            name,
+            0,
+            windows::Win32::Storage::FileSystem::FILE_SHARE_READ,
+        )
+        .unwrap();
+        let expected = crate::path::identity_key(&asset.file, &asset.path).unwrap();
+        drop(asset);
+        assert!(matches!(
+            open_render_source(root, name, "incorrect file ID", kind),
+            Err(Error::Conflict)
+        ));
+        assert_eq!(
+            open_render_source(root, name, &expected, kind)
+                .unwrap()
+                .into_bytes()
+                .unwrap(),
+            data
+        );
         assert!(matches!(
             save_text(root, name, "v1:invalid", "replacement"),
             Err(Error::Unsupported(_))
         ));
-        assert_eq!(fs::read(root.join(name)).unwrap(), data);
+        assert_eq!(fs::read(path).unwrap(), data);
+    }
+    for name in [
+        "old.doc",
+        "old.ppt",
+        "old.xls",
+        "report.odt",
+        "slides.odp",
+        "table.ods",
+        "note.rtf",
+    ] {
+        fs::write(root.join(name), b"test").unwrap();
+        assert_eq!(preview(root, name).unwrap().kind, PreviewKind::Office);
     }
     fs::write(root.join("malformed.docx"), b"pretend text").unwrap();
     fs::write(root.join("macro.docm"), word_fixture()).unwrap();
-    fs::write(root.join("legacy.doc"), word_fixture()).unwrap();
     fs::File::create(root.join("large.pdf"))
         .unwrap()
-        .set_len(crate::document_text::MAX_INPUT as u64 + 1)
+        .set_len(64 * 1024 * 1024 + 1)
         .unwrap();
-    for name in ["malformed.docx", "macro.docm", "legacy.doc", "large.pdf"] {
+    assert!(!text_matches(root, "malformed.docx", "").unwrap());
+    for name in ["macro.docm", "large.pdf"] {
         assert!(!text_matches(root, name, "").unwrap());
         assert_eq!(preview(root, name).unwrap().kind, PreviewKind::Unsupported);
     }

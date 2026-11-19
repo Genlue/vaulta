@@ -1,6 +1,6 @@
 [package]
 name = "vaulta"
-version = "0.3.6"
+version = "0.3.22"
 description = "Local-first personal digital asset library"
 edition = "2024"
 rust-version = "1.90"
@@ -23,6 +23,17 @@ tauri-plugin-dialog = "2"
 tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+tauri-plugin-updater = { version = "2.14.1", default-features = false, features = ["native-tls", "system-proxy"] }
+winreg = "0.56"
+base64 = "0.22"
+flate2 = "1"
+quick-xml = "0.42"
+rawzip = "0.5"
+windows = { version = "0.62", features = [
+    "Data_Pdf", "Graphics_Imaging", "Storage_Streams", "Win32_Graphics_Gdi",
+    "Win32_System_Com", "Win32_System_Ole", "Win32_System_Variant", "Win32_System_WinRT", "Win32_UI_Shell_PropertiesSystem",
+    "Win32_UI_WindowsAndMessaging",
+] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 vaulta-core = { path = "../crates/vaulta-core" }
 vaulta-fs = { path = "../crates/vaulta-fs" }
