@@ -29,11 +29,27 @@ const snapshotIndexes = new WeakMap();
 function getSnapshotIndex(s) {
   let cached = snapshotIndexes.get(s);
   if (!cached) {
+    const folders = folderIndex(s.assets);
+    const inboxByFolder = new Map();
+    let inbox = 0;
+    for (const a of s.assets) {
+      if (a.state !== 'inbox') continue;
+      inbox++;
+      if (a.synthetic || !withinBoundary(a, folders.units)) continue;
+      const parts = splitPath(a.rel);
+      for (let i = 1; i <= parts.length; i++) {
+        const key = pathKey(parts.slice(0, i).join('/'));
+        let list = inboxByFolder.get(key);
+        if (!list) { list = []; inboxByFolder.set(key, list); }
+        list.push(a);
+      }
+    }
     cached = {
-      folders: folderIndex(s.assets),
+      folders,
       categories: makeCategoryIndex(s.categories),
       flags: unique([...defaultFlags, ...s.assets.flatMap(a => a.flags)]).sort(collator.compare),
-      inbox: s.assets.filter(a => a.state === 'inbox').length,
+      inbox,
+      inboxByFolder,
     };
     snapshotIndexes.set(s, cached);
   }
@@ -52,8 +68,7 @@ const folderInboxItems = folder => {
   if (!folder) return [];
   const vaultId = folder.vaultId || S.id;
   const s = S.cache.get(vaultId) || snap();
-  const currentFolders = getSnapshotIndex(s).folders;
-  return s.assets.filter(a => !a.synthetic && a.state === 'inbox' && containsPath(folder.rel, a.rel) && withinBoundary(a, currentFolders.units));
+  return getSnapshotIndex(s).inboxByFolder.get(pathKey(folder.rel)) || [];
 };
 const itemAt = key => S.byKey.get(key);
 const selection = () => [...S.selected].map(itemAt).filter(Boolean);
@@ -158,9 +173,9 @@ function attachVeil() {
 // Preserve the live SearchField on results/scan redraws. Recreate it only when
 // the host actually replaces the query; this also preserves an IME composition.
 const capsule = (contents, className, size = 'auto', variant = '') => widget('capsule', { size, ...(variant ? { className: variant } : {}) }, { className, fallback: contents, tag: 'div' });
-const viewState = () => ({ id: S.id, page: S.page, facet: S.facet, folder: S.folder, filters: structuredClone(S.filters), viewId: S.viewId, sort: S.sort, direction: S.direction, markMode: S.markMode });
+const viewState = () => ({ id: S.id, page: S.page, facet: S.facet, folder: S.folder, filters: structuredClone(S.filters), viewId: S.viewId, sort: S.sort, direction: S.direction });
 const sameView = (a, b) => !!a && !!b && a.id === b.id && a.page === b.page && a.facet === b.facet && a.folder === b.folder
-  && a.viewId === b.viewId && a.sort === b.sort && a.direction === b.direction && a.markMode === b.markMode
+  && a.viewId === b.viewId && a.sort === b.sort && a.direction === b.direction
   && JSON.stringify(a.filters) === JSON.stringify(b.filters);
 function paintNavPair() {
   const slot = $('#navpair-slot');
@@ -253,7 +268,16 @@ function resizeRail(value) {
   // Do not write to disk on every pointermove; the selected width is a UI preference.
   saveRailTimer = setTimeout(() => persist('rail-width', prefs.railWidth), 160);
 }
-window.addEventListener('resize', () => { if (gripHost.firstElementChild) renderRailGrip(); applyInspectWidth(); renderInspectGrip(); });
+let resizeFrame = 0;
+window.addEventListener('resize', () => {
+  if (resizeFrame) return;
+  resizeFrame = requestAnimationFrame(() => {
+    resizeFrame = 0;
+    if (gripHost.firstElementChild) renderRailGrip();
+    applyInspectWidth();
+    renderInspectGrip();
+  });
+});
 window.addEventListener('pagehide', () => {
   if (prefs.railWidth != null) persist('rail-width', prefs.railWidth);
   if (prefs.inspectWidth != null) persist('inspect-width', prefs.inspectWidth);
@@ -306,12 +330,19 @@ inspectGripHost.addEventListener('pointerdown', event => {
   document.documentElement.dataset.resizing = 'x';
   inspectDrag = { id: event.pointerId, x: event.clientX, width: effectiveInspectWidth() };
 });
+let inspectMoveFrame = 0, inspectPendingX = 0;
 inspectGripHost.addEventListener('pointermove', event => {
   if (!inspectDrag || event.pointerId !== inspectDrag.id) return;
-  resizeInspector(inspectDrag.width - (event.clientX - inspectDrag.x));
+  inspectPendingX = event.clientX;
+  if (inspectMoveFrame) return;
+  inspectMoveFrame = requestAnimationFrame(() => {
+    inspectMoveFrame = 0;
+    if (inspectDrag) resizeInspector(inspectDrag.width - (inspectPendingX - inspectDrag.x));
+  });
 });
 function endInspectDrag(event) {
   if (!inspectDrag || (event && event.pointerId !== inspectDrag.id)) return;
+  if (inspectMoveFrame) { cancelAnimationFrame(inspectMoveFrame); inspectMoveFrame = 0; }
   inspectDrag = null;
   delete document.documentElement.dataset.resizing;
   const grip = inspectGripHost.firstElementChild;
@@ -979,10 +1010,30 @@ async function loadFlowPage(index) {
     updateFlowPageError(index, res.error);
   }
 }
-function scheduleFlowLoad(index) {
+function syncFlowActivePage(root, pageIdx, count) {
+  root.querySelectorAll('.pdf-flow-item').forEach(el => {
+    const isTarget = parseInt(el.dataset.page, 10) === pageIdx;
+    el.classList.toggle('pdf-page', isTarget);
+    el.classList.toggle('active', isTarget);
+  });
+  const label = root.querySelector('.pdf-page-label');
+  if (label) label.textContent = `${pageIdx + 1} / ${count}`;
+  const prevBtn = root.querySelector('[data-act="pdf-view"][data-value="prev"]');
+  const nextBtn = root.querySelector('[data-act="pdf-view"][data-value="next"]');
+  if (prevBtn) { if (pageIdx === 0) prevBtn.setAttribute('aria-disabled', 'true'); else prevBtn.removeAttribute('aria-disabled'); }
+  if (nextBtn) { if (pageIdx + 1 >= count) nextBtn.setAttribute('aria-disabled', 'true'); else nextBtn.removeAttribute('aria-disabled'); }
+}
+function scheduleFlowLoad(index, priority = false) {
   const p = S.preview?.paged;
   if (!p || index < 0 || index >= p.count || p.pages?.has(index) || p.loadingPages?.has(index)) return;
-  if (!flowQueue.includes(index)) flowQueue.push(index);
+  const pos = flowQueue.indexOf(index);
+  if (pos !== -1) {
+    if (priority && pos > 0) { flowQueue.splice(pos, 1); flowQueue.unshift(index); }
+  } else if (priority) {
+    flowQueue.unshift(index);
+  } else {
+    flowQueue.push(index);
+  }
   void drainFlowQueue();
 }
 async function drainFlowQueue() {
@@ -999,6 +1050,7 @@ async function drainFlowQueue() {
 }
 function setupDocFlow(inspectorNode) {
   flowObserver?.disconnect();
+  flowQueue = [];
   const flowContainer = inspectorNode.querySelector('.pdf-flow');
   if (!flowContainer) return;
   const items = flowContainer.querySelectorAll('.pdf-flow-item');
@@ -1010,8 +1062,8 @@ function setupDocFlow(inspectorNode) {
     for (const entry of entries) {
       const pageIdx = parseInt(entry.target.dataset.page, 10);
       if (entry.isIntersecting) {
-        scheduleFlowLoad(pageIdx);
-        scheduleFlowLoad(pageIdx + 1);
+        scheduleFlowLoad(pageIdx, true);
+        scheduleFlowLoad(pageIdx + 1, false);
         if (entry.intersectionRatio > maxRatio) {
           maxRatio = entry.intersectionRatio;
           bestPage = pageIdx;
@@ -1022,23 +1074,7 @@ function setupDocFlow(inspectorNode) {
       const p = S.preview?.paged;
       if (p && p.page !== bestPage) {
         p.page = bestPage;
-        items.forEach(el => {
-          const isTarget = parseInt(el.dataset.page, 10) === bestPage;
-          el.classList.toggle('pdf-page', isTarget);
-          el.classList.toggle('active', isTarget);
-        });
-        const label = inspectorNode.querySelector('.pdf-page-label');
-        if (label) label.textContent = `${bestPage + 1} / ${p.count}`;
-        const prevBtn = inspectorNode.querySelector('[data-act="pdf-view"][data-value="prev"]');
-        const nextBtn = inspectorNode.querySelector('[data-act="pdf-view"][data-value="next"]');
-        if (prevBtn) {
-          if (bestPage === 0) prevBtn.setAttribute('aria-disabled', 'true');
-          else prevBtn.removeAttribute('aria-disabled');
-        }
-        if (nextBtn) {
-          if (bestPage + 1 >= p.count) nextBtn.setAttribute('aria-disabled', 'true');
-          else nextBtn.removeAttribute('aria-disabled');
-        }
+        syncFlowActivePage(inspectorNode, bestPage, p.count);
       }
     }
   }, { root: scrollRoot || null, rootMargin: '400px 0px', threshold: [0, 0.25, 0.5, 0.75, 1.0] });
@@ -1047,7 +1083,7 @@ function setupDocFlow(inspectorNode) {
 
   const p = S.preview?.paged;
   if (p && p.count > 1) {
-    scheduleFlowLoad(1);
+    scheduleFlowLoad(1, false);
   }
 }
 function renderPaged(p) {
@@ -1133,15 +1169,20 @@ async function pageAction(value) {
     const zoom = value === 'fit' ? 100 : Math.max(100, Math.min(300, paged.zoom + (value === 'in' ? 50 : -50)));
     if (zoom === paged.zoom) return;
     paged.zoom = zoom;
-    S.preview = { ...p, paged: { ...paged, zoom } };
-    renderInspector();
+    for (const img of inspector.querySelectorAll('.pdf-page > img, .pdf-flow-item > img')) img.style.width = `${zoom}%`;
+    const zoomLabel = inspector.querySelector('.pdf-zoom');
+    if (zoomLabel) zoomLabel.textContent = `${zoom}%`;
+    const outBtn = inspector.querySelector('[data-act="pdf-view"][data-value="out"]');
+    const inBtn = inspector.querySelector('[data-act="pdf-view"][data-value="in"]');
+    if (outBtn) { if (zoom === 100) outBtn.setAttribute('aria-disabled', 'true'); else outBtn.removeAttribute('aria-disabled'); }
+    if (inBtn) { if (zoom === 300) inBtn.setAttribute('aria-disabled', 'true'); else inBtn.removeAttribute('aria-disabled'); }
     focus();
     return;
   }
 
   if (value.startsWith('retry-')) {
     const idx = parseInt(value.slice(6), 10);
-    if (Number.isInteger(idx)) scheduleFlowLoad(idx);
+    if (Number.isInteger(idx)) scheduleFlowLoad(idx, true);
     return;
   }
 
@@ -1153,27 +1194,10 @@ async function pageAction(value) {
 
   if (isFlow) {
     paged.page = index;
-    inspector.querySelectorAll('.pdf-flow-item').forEach(el => {
-      const pageIdx = parseInt(el.dataset.page, 10);
-      const isTarget = pageIdx === index;
-      el.classList.toggle('pdf-page', isTarget);
-      el.classList.toggle('active', isTarget);
-    });
-    const label = inspector.querySelector('.pdf-page-label');
-    if (label) label.textContent = `${index + 1} / ${paged.count}`;
-    const prevBtn = inspector.querySelector('[data-act="pdf-view"][data-value="prev"]');
-    const nextBtn = inspector.querySelector('[data-act="pdf-view"][data-value="next"]');
-    if (prevBtn) {
-      if (index === 0) prevBtn.setAttribute('aria-disabled', 'true');
-      else prevBtn.removeAttribute('aria-disabled');
-    }
-    if (nextBtn) {
-      if (index + 1 >= paged.count) nextBtn.setAttribute('aria-disabled', 'true');
-      else nextBtn.removeAttribute('aria-disabled');
-    }
+    syncFlowActivePage(inspector, index, paged.count);
     const targetItem = inspector.querySelector(`.pdf-flow-item[data-page="${index}"]`);
     targetItem?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    scheduleFlowLoad(index);
+    scheduleFlowLoad(index, true);
     focus();
     return;
   }
@@ -1413,7 +1437,7 @@ async function refreshView(id = S.id, fresh = true) {
   catch (error) { if (id === S.id) S.error = msg(error); else throw error; }
   finally { if (id === S.id) { S.loading = false; render(); } }
 }
-function clearSelection() { S.deferFolderPane = false; S.selected.clear(); S.anchor = null; S.multi = false; S.previewToken++; S.preview = null; S.tab = 'details'; }
+function clearSelection() { flowQueue = []; S.deferFolderPane = false; S.selected.clear(); S.anchor = null; S.multi = false; S.previewToken++; S.preview = null; S.tab = 'details'; }
 function resetView() { S.limit = 160; S.filters = clearFilters(); clearSelection(); S.error = ''; }
 function nav(page, opts = {}) {
   if (page === 'marking' || page === 'tags') page = 'flags';
@@ -1431,8 +1455,10 @@ function nav(page, opts = {}) {
 async function switchVault(id, page = 'physical', folder = '') {
   if (!getVault(id)) return;
   S.id = id; persist('active', id); S.notice = ''; S.dup = null; S.dupToken++;
-  S.loading = !S.cache.has(id);
-  nav(page, { folder }); await refreshView(id, false);
+  const cached = S.cache.has(id) && !S.changed.has(id);
+  S.loading = !cached;
+  nav(page, { folder });
+  if (!cached) await refreshView(id, false);
 }
 async function getDuplicates() {
   const id = S.id, token = ++S.dupToken;
@@ -1483,7 +1509,7 @@ function syncSelection(old, deferFolderPane = false) {
   const paneWasDeferred = S.deferFolderPane;
   S.deferFolderPane = deferFolderPane;
   const item = one();
-  if (old !== item) { S.previewToken++; S.preview = null; }
+  if (old !== item) { flowQueue = []; S.previewToken++; S.preview = null; }
   if (!item || item.synthetic || item.state === 'missing') S.tab = 'details';
   const bulk = $('#bulk'); if (bulk) { unmount(bulk); bulk.outerHTML = renderBulk(); mount($('#bulk')); }
   updateReview();
@@ -1692,7 +1718,7 @@ function removeVault(v) {
     const detached = new Set([v.id]);
     for (let size = 0; size !== detached.size;) { size = detached.size; for (const item of S.registry) if (detached.has(item.parent_id)) detached.add(item.id); }
     S.registry = S.registry.filter(item => !detached.has(item.id));
-    for (const id of detached) { S.cache.delete(id); S.access.delete(id); }
+    for (const id of detached) { S.cache.delete(id); S.access.delete(id); S.expanded.delete(`${id}:tree`); S.expanded.delete(`${id}:inbox`); }
     if (detached.has(S.id)) { S.id = null; persist('active', null); nav('home'); } else render();
     toast('已移除仓库，磁盘文件未删除');
   } });
@@ -1711,7 +1737,8 @@ async function afterChanges(ids) {
   if (S.page === 'search') await doSearch();
   else if (ids.some(id => id !== S.id)) render();
   if (S.page === 'duplicates') void getDuplicates();
-  if (one() && S.tab === 'preview') void loadPreview(one(), { used: false });
+  const item = one();
+  if (item && !inspector.hidden && S.tab === 'preview' && needsPreview(item)) void loadPreview(item, { used: false });
 }
 function targetSummary(items) {
   return `<div class="target-summary"><strong>${items.length} 个项目 · ${perVault(items).size} 个仓库</strong><ul>${items.slice(0, 5).map(a => `<li title="${esc(extPath(a))}">${esc(sourceName(a.vaultId))} / ${esc(a.rel || a.name)}</li>`).join('')}${items.length > 5 ? `<li>还有 ${items.length - 5} 项</li>` : ''}</ul></div>`;
@@ -1916,7 +1943,7 @@ async function doSearch({ preserve = false } = {}) {
   await Promise.all(Array.from({ length: Math.min(4, ids.length) }, worker));
   const matches = await matchJob;
   if (token !== S.searchToken || S.page !== 'search') return;
-  S.searching = false; S.searchErrors = errors; S.searchItems = searchAssets(results, keyword, matches); render();
+  S.searching = false; S.searchErrors = errors; S.searchItems = searchAssets(results, keyword, matches, getSnapshotIndex); render();
 }
 let searchTimer;
 function beginSearch(value, immediate = false) {
@@ -2020,10 +2047,33 @@ async function action(name, value, node) {
     case 'review-file': return reviewFile();
     case 'review-organize': if (S.review && !S.reviewing) return organize([one()].filter(Boolean), { review: true }); return;
     case 'switch': return switchVault(value);
-    case 'toggle-rail': S.rail = !S.rail; render(); return;
+    case 'toggle-rail': {
+      S.rail = !S.rail;
+      closeMenu(false);
+      $('#app').classList.toggle('rail-hidden', !S.rail);
+      const label = `${S.rail ? '隐藏' : '显示'}${prefs.nav === 'dock' ? '导航' : '侧栏'}`;
+      const btn = $('#rail-toggle [data-act="toggle-rail"]');
+      if (btn) {
+        btn.setAttribute('aria-expanded', String(S.rail));
+        btn.setAttribute('aria-label', label);
+        btn.title = label;
+      } else {
+        redraw($('#rail-toggle'), ib(label, 'toggle-rail', 'panel-left', { attrs: `aria-expanded="${S.rail}"` }));
+      }
+      applyInspectWidth();
+      renderDock();
+      renderRailGrip();
+      renderInspectGrip();
+      return;
+    }
     case 'toggle-pane':
       S.pane = S.deferFolderPane || !S.pane; S.deferFolderPane = false;
-      render(); if (!inspector.hidden && S.tab === 'preview' && one() && needsPreview(one())) void loadPreview(one()); return;
+      closeMenu(false);
+      renderInspector();
+      renderChromeInto();
+      renderStatus();
+      if (!inspector.hidden && S.tab === 'preview' && one() && needsPreview(one())) void loadPreview(one());
+      return;
     case 'edit-undo': editFocus(); document.execCommand('undo'); return;
     case 'edit-redo': editFocus(); document.execCommand('redo'); return;
     case 'edit-cut': return editClipboard('cut');
@@ -2214,17 +2264,7 @@ document.addEventListener('click', event => {
     const p = S.preview?.paged;
     if (Number.isInteger(pageIdx) && p && p.page !== pageIdx) {
       p.page = pageIdx;
-      inspector.querySelectorAll('.pdf-flow-item').forEach(el => {
-        const isTarget = parseInt(el.dataset.page, 10) === pageIdx;
-        el.classList.toggle('pdf-page', isTarget);
-        el.classList.toggle('active', isTarget);
-      });
-      const label = inspector.querySelector('.pdf-page-label');
-      if (label) label.textContent = `${pageIdx + 1} / ${p.count}`;
-      const prevBtn = inspector.querySelector('[data-act="pdf-view"][data-value="prev"]');
-      const nextBtn = inspector.querySelector('[data-act="pdf-view"][data-value="next"]');
-      if (prevBtn) { if (pageIdx === 0) prevBtn.setAttribute('aria-disabled', 'true'); else prevBtn.removeAttribute('aria-disabled'); }
-      if (nextBtn) { if (pageIdx + 1 >= p.count) nextBtn.setAttribute('aria-disabled', 'true'); else nextBtn.removeAttribute('aria-disabled'); }
+      syncFlowActivePage(inspector, pageIdx, p.count);
     }
   }
   const tile = event.target.closest('[data-asset]');
@@ -2262,12 +2302,18 @@ function clearDrag() {
   dragSession = null;
   for (const node of workspace.querySelectorAll('.dragging')) node.classList.remove('dragging');
 }
+let dragScrollFrame = 0, dragScrollY = 0;
 function dragScroll(event) {
-  const stage = $('#stage');
-  if (!stage) return;
-  const box = stage.getBoundingClientRect(), edge = Math.min(64, box.height / 4);
-  if (event.clientY < box.top + edge) stage.scrollBy(0, -10);
-  else if (event.clientY > box.bottom - edge) stage.scrollBy(0, 10);
+  dragScrollY = event.clientY;
+  if (dragScrollFrame) return;
+  dragScrollFrame = requestAnimationFrame(() => {
+    dragScrollFrame = 0;
+    const stage = $('#stage');
+    if (!stage || !dragSession) return;
+    const box = stage.getBoundingClientRect(), edge = Math.min(64, box.height / 4);
+    if (dragScrollY < box.top + edge) stage.scrollBy(0, -10);
+    else if (dragScrollY > box.bottom - edge) stage.scrollBy(0, 10);
+  });
 }
 async function dropMove(target, items) {
   const destination = absolute(getVault(target.vaultId)?.root, target.rel);
@@ -2302,7 +2348,8 @@ document.addEventListener('dragstart', event => {
 });
 document.addEventListener('dragover', event => {
   if (!dragSession) return;
-  const zone = dropTargetOf(event.target), plan = dropPlan(zone, dragSession.items);
+  const zone = dropTargetOf(event.target);
+  const plan = zone === dragSession.lastZone ? dragSession.lastPlan : (dragSession.lastZone = zone, dragSession.lastPlan = dropPlan(zone, dragSession.items));
   if (!plan) { clearDrop(); return; }
   event.preventDefault();
   if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
@@ -2445,7 +2492,7 @@ document.addEventListener('keydown', e => {
   else if (key === 'F2' && a && !a.synthetic && !['excluded','missing'].includes(a.state)) { e.preventDefault(); renameFile(a); }
   else if (key === 'F5') { e.preventDefault(); perform('rescan'); }
   else if (key === 'Delete' && S.selected.size) { e.preventDefault(); recycle(selection()); }
-  else if (tile && isDir(a) && S.page === 'all' && prefs.layout === 'list' && (key === 'ArrowLeft' || key === 'ArrowRight')) {
+  else if (tile && isDir(a) && (S.page === 'all' || S.page === 'inbox') && !filterCount() && prefs.layout === 'list' && (key === 'ArrowLeft' || key === 'ArrowRight')) {
     const row = S.rows.find(entry => assetKey(entry.item) === tile.dataset.asset);
     if (row?.hasChildren && !(key === 'ArrowRight' ? row.open : !row.open)) { e.preventDefault(); perform('tree-toggle', pathKey(row.item.rel), tile); }
   }
@@ -2483,19 +2530,28 @@ function warning(payload) {
   if (!payload.vault_id || payload.vault_id === S.id) { S.notice = message; if (!isDirty()) render(); }
   toast(message, 'warn', 6500);
 }
-async function boot() {
+async function boot(prefetchedRegistry = null) {
   S.booting = connected(); S.error = ''; render();
   if (!connected()) { S.booting = false; renderStatus(); return; }
+  let rendered = false;
   try {
     if (!listening) { listening = true; host.listen(changed, warning).catch(error => { listening = false; toast(msg(error), 'warn'); }); }
-    await loadRegistry();
+    if (prefetchedRegistry) {
+      const err = await prefetchedRegistry;
+      if (err) throw err;
+    } else await loadRegistry();
     const last = stored('active', null), initial = getVault(last) || roots()[0];
-    if (initial) await switchVault(initial.id, 'physical');
+    if (initial) {
+      S.booting = false;
+      await switchVault(initial.id, 'physical');
+      rendered = true;
+    }
   } catch (error) { S.error = msg(error); }
-  finally { S.booting = false; render(); }
+  finally { S.booting = false; if (!rendered) render(); }
 }
 void installGlassDefinitions();
+const initialRegistry = connected() ? loadRegistry().then(() => null, error => error) : null;
 await installGlass(perform);
 await installWindowChrome();
-void boot();
+void boot(initialRegistry);
 if (connected()) updates.start();

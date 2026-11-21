@@ -37,11 +37,8 @@ mod native {
             .access_mode(FILE_READ_ATTRIBUTES)
             .share_mode(
                 FILE_SHARE_READ
-                    | if pin {
-                        0
-                    } else {
-                        FILE_SHARE_WRITE | FILE_SHARE_DELETE
-                    },
+                    | FILE_SHARE_WRITE
+                    | if pin { 0 } else { FILE_SHARE_DELETE },
             )
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
             .open(path)
@@ -105,8 +102,32 @@ mod native {
         }))
     }
 
+    pub(crate) fn basic_stable(file: &Handle, before: &Physical) -> bool {
+        let Ok(basic) = query::<FILE_BASIC_INFO>(file, FileBasicInfo) else {
+            return false;
+        };
+        basic.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT == 0
+            && basic.ChangeTime == before.changed
+            && filetime_ms(basic.LastWriteTime) == before.modified
+    }
+
     pub(crate) fn final_path(file: &Handle) -> io::Result<PathBuf> {
-        let mut buffer = vec![0u16; 512];
+        let mut stack = [0u16; 512];
+        let count = unsafe {
+            GetFinalPathNameByHandleW(
+                file.as_raw_handle(),
+                stack.as_mut_ptr(),
+                stack.len() as u32,
+                FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
+            )
+        } as usize;
+        if count == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if count < stack.len() {
+            return Ok(std::ffi::OsString::from_wide(&stack[..count]).into());
+        }
+        let mut buffer = vec![0u16; count + 1];
         loop {
             let count = unsafe {
                 GetFinalPathNameByHandleW(
@@ -131,6 +152,36 @@ mod native {
     }
 
     pub(crate) fn same_name(a: &OsStr, b: &OsStr) -> bool {
+        let mut sa = [0u16; 260];
+        let mut sb = [0u16; 260];
+        let mut na = 0usize;
+        let mut overflow = false;
+        for u in a.encode_wide() {
+            if na < sa.len() {
+                sa[na] = u;
+                na += 1;
+            } else {
+                overflow = true;
+                break;
+            }
+        }
+        let mut nb = 0usize;
+        if !overflow {
+            for u in b.encode_wide() {
+                if nb < sb.len() {
+                    sb[nb] = u;
+                    nb += 1;
+                } else {
+                    overflow = true;
+                    break;
+                }
+            }
+        }
+        if !overflow {
+            return unsafe {
+                CompareStringOrdinal(sa.as_ptr(), na as i32, sb.as_ptr(), nb as i32, 1) == 2
+            };
+        }
         let a: Vec<_> = a.encode_wide().collect();
         let b: Vec<_> = b.encode_wide().collect();
         unsafe {
@@ -153,6 +204,9 @@ mod native {
     pub(crate) fn inspect(_: &Handle) -> io::Result<Option<Physical>> {
         Ok(None)
     }
+    pub(crate) fn basic_stable(_: &Handle, _: &Physical) -> bool {
+        false
+    }
     pub(crate) fn final_path(_: &Handle) -> io::Result<PathBuf> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -164,7 +218,7 @@ mod native {
     }
 }
 
-pub(crate) use native::{final_path, inspect, open, same_name, Handle};
+pub(crate) use native::{basic_stable, final_path, inspect, open, same_name, Handle};
 
 #[derive(Debug)]
 pub(crate) struct Guarded {
@@ -175,7 +229,8 @@ pub(crate) struct Guarded {
 }
 
 pub(crate) fn reserved(name: &OsStr) -> bool {
-    same_name(name, OsStr::new(".vaulta-views"))
+    name.to_str()
+        .is_some_and(|s| s.eq_ignore_ascii_case(".vaulta-views"))
 }
 
 fn valid_name(s: &str) -> bool {
@@ -187,23 +242,29 @@ fn valid_name(s: &str) -> bool {
     {
         return false;
     }
-    let stem = s
-        .split('.')
-        .next()
-        .unwrap_or_default()
-        .trim_end()
-        .to_ascii_uppercase();
-    !matches!(
-        stem.as_str(),
-        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
-    ) && !["COM", "LPT"].iter().any(|p| {
-        stem.strip_prefix(p).is_some_and(|n| {
-            matches!(
-                n,
+    let stem = s.split('.').next().unwrap_or_default().trim_end();
+    if matches!(stem.len(), 3 | 6 | 7)
+        && (stem.eq_ignore_ascii_case("CON")
+            || stem.eq_ignore_ascii_case("PRN")
+            || stem.eq_ignore_ascii_case("AUX")
+            || stem.eq_ignore_ascii_case("NUL")
+            || stem.eq_ignore_ascii_case("CONIN$")
+            || stem.eq_ignore_ascii_case("CONOUT$"))
+    {
+        return false;
+    }
+    if let Some(prefix) = stem.get(..3) {
+        if prefix.eq_ignore_ascii_case("COM") || prefix.eq_ignore_ascii_case("LPT") {
+            let suffix = &stem[3..];
+            if matches!(
+                suffix,
                 "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
-            )
-        })
-    })
+            ) {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 pub(crate) fn relative(path: &str) -> Result<PathBuf> {
@@ -350,8 +411,7 @@ impl Walk {
     }
 
     pub(crate) fn validate_root(&mut self, guard: &Guarded) {
-        if !matches!(inspect(&guard.handle), Ok(Some(after)) if stable_directory(&guard.physical, &after))
-        {
+        if !basic_stable(&guard.handle, &guard.physical) {
             self.entries.clear();
             self.complete = false;
         }
@@ -392,47 +452,63 @@ impl Walk {
                 self.complete = false;
                 continue;
             };
+            // On Windows, DirEntry::file_type reads WIN32_FIND_DATAW directly with zero syscalls.
+            let ft = item.file_type().ok();
+            if ft.is_some_and(|t| t.is_symlink()) {
+                continue;
+            }
             let path = item.path();
-            let physical = open(&path, false).and_then(|handle| inspect(&handle));
-            let physical = match physical {
-                Ok(Some(p)) => p,
-                Ok(None) => continue,
-                Err(_) => {
-                    self.complete = false;
-                    continue;
-                }
-            };
             let rel = if prefix.is_empty() {
                 name.to_owned()
             } else {
                 format!("{prefix}/{name}")
             };
-            if physical.directory && !units.contains(&physical.identity) {
+            let expect_dir = ft.is_some_and(|t| t.is_dir());
+            let physical = if expect_dir {
                 match open(&path, true).and_then(|child| inspect(&child).map(|p| (child, p))) {
-                    Ok((child, Some(p))) if p.identity == physical.identity => {
-                        self.descend(&path, &rel, &child, &p, units, depth + 1)
+                    Ok((child, Some(p))) => {
+                        if p.directory && !units.contains(&p.identity) {
+                            self.descend(&path, &rel, &child, &p, units, depth + 1);
+                        }
+                        p
                     }
-                    _ => {
+                    Ok((_, None)) => continue,
+                    Err(_) => {
                         self.complete = false;
                         continue;
                     }
                 }
-            }
+            } else {
+                let physical = match open(&path, false).and_then(|handle| inspect(&handle)) {
+                    Ok(Some(p)) => p,
+                    Ok(None) => continue,
+                    Err(_) => {
+                        self.complete = false;
+                        continue;
+                    }
+                };
+                if physical.directory && !units.contains(&physical.identity) {
+                    match open(&path, true).and_then(|child| inspect(&child).map(|p| (child, p))) {
+                        Ok((child, Some(p))) if p.identity == physical.identity => {
+                            self.descend(&path, &rel, &child, &p, units, depth + 1)
+                        }
+                        _ => {
+                            self.complete = false;
+                            continue;
+                        }
+                    }
+                }
+                physical
+            };
             self.entries.push(Entry {
                 path: rel,
                 physical,
             });
         }
-        if !matches!(inspect(handle), Ok(Some(after)) if stable_directory(before, &after)) {
+        if !basic_stable(handle, before) {
             // Discard the unstable subtree rather than committing observations from a raced path.
             self.entries.truncate(start);
             self.complete = false;
         }
     }
-}
-
-fn stable_directory(before: &Physical, after: &Physical) -> bool {
-    before.identity == after.identity
-        && before.changed == after.changed
-        && before.modified == after.modified
 }

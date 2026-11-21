@@ -529,3 +529,34 @@ fn scan_suggests_categories_and_filing_fills_the_gap() {
     assert_eq!(filed.state, "filed");
     assert_eq!(name(&filed), Some("文档"));
 }
+
+#[test]
+fn concurrent_open_does_not_fail_migration_and_directories_are_not_auto_classified() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("concurrent.db");
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+    std::thread::scope(|scope| {
+        for _ in 0..4 {
+            let barrier = barrier.clone();
+            let db = &db;
+            scope.spawn(move || {
+                barrier.wait();
+                let core = Core::open(db).unwrap();
+                assert_eq!(core.revision().unwrap(), 0);
+            });
+        }
+    });
+
+    let mut s = Setup::new();
+    fs::create_dir_all(s.path("backup.zip")).unwrap();
+    s.scan();
+    let dir = s.asset("backup.zip");
+    assert_eq!(dir.kind, "directory");
+    assert!(dir.category_id.is_none());
+    s.action(json!({"type":"organize","ids":[dir.id],"state":"inbox"}));
+    s.action(json!({"type":"organize","ids":[dir.id],"state":"filed"}));
+    assert!(
+        s.asset("backup.zip").category_id.is_none(),
+        "directories must not receive file-extension category suggestions"
+    );
+}

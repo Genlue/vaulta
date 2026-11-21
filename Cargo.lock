@@ -4615,7 +4615,7 @@ dependencies = [
 
 [[package]]
 name = "vaulta"
-version = "0.3.22"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

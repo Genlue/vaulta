@@ -51,7 +51,7 @@ try {
             $cargo = [regex]::Replace($saved.Cargo, '(?m)^version\s*=\s*"' + [regex]::Escape($current) + '"', 'version = "' + $Version + '"', 1)
             [System.IO.File]::WriteAllText($cargoPath, $cargo, $utf8)
             # Refresh the workspace lock entry before the --locked build.
-            cargo check -p vaulta --offline | Out-Null
+            cargo update --workspace --offline | Out-Null
             if ($LASTEXITCODE -ne 0) { throw 'Failed to refresh Cargo.lock after the version bump.' }
             Write-Host "Version: $current -> $Version"
         } else {

@@ -9,7 +9,14 @@ mod window_chrome;
 use anyhow::{Context, Result, bail, ensure};
 use ops::{changed, checked_asset, projection_notice};
 use serde::Serialize;
-use std::{path::PathBuf, sync::mpsc::Sender};
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicI64, AtomicU64, Ordering},
+        mpsc::Sender,
+    },
+};
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use vaulta::{database_path, locked, read};
@@ -20,6 +27,14 @@ type Reply<T> = std::result::Result<T, String>;
 struct Desktop {
     db: PathBuf,
     wake: Sender<watcher::Wake>,
+    app_revision: Arc<AtomicI64>,
+    search_gen: Arc<AtomicU64>,
+}
+
+fn mark_revision(slot: &AtomicI64, core: &Core) {
+    if let Ok(rev) = core.revision() {
+        slot.store(rev, Ordering::Release);
+    }
 }
 
 async fn blocking<T: Send + 'static>(job: impl FnOnce() -> Result<T> + Send + 'static) -> Reply<T> {
@@ -72,6 +87,7 @@ async fn add_vault(
 ) -> Reply<Vault> {
     let db = state.db.clone();
     let wake = state.wake.clone();
+    let app_rev = state.app_revision.clone();
     dispatch(&state, move |core| {
         let name = name.trim();
         let root = if create {
@@ -97,6 +113,7 @@ async fn add_vault(
         };
         ops::prevent_data_overlap(&root, &db)?;
         let v = core.add_vault(&root, name)?;
+        mark_revision(&app_rev, core);
         changed(&app, "");
         let _ = wake.send(watcher::Wake::One(v.id.clone()));
         Ok(v)
@@ -113,10 +130,12 @@ async fn relocate_vault(
 ) -> Reply<Vault> {
     let db = state.db.clone();
     let wake = state.wake.clone();
+    let app_rev = state.app_revision.clone();
     dispatch(&state, move |core| {
         ensure!(path.is_absolute(), "请选择仓库搬迁后的绝对路径。");
         ops::prevent_data_overlap(&path, &db)?;
         let vault = core.relocate_vault(&vault_id, &path)?;
+        mark_revision(&app_rev, core);
         let _ = wake.send(watcher::Wake::Relocated(vault_id));
         changed(&app, "");
         Ok(vault)
@@ -131,8 +150,10 @@ async fn rename_vault(
     vault_id: String,
     name: String,
 ) -> Reply<()> {
+    let app_rev = state.app_revision.clone();
     dispatch(&state, move |core| {
         core.rename_vault(&vault_id, &name)?;
+        mark_revision(&app_rev, core);
         changed(&app, "");
         Ok(())
     })
@@ -141,8 +162,12 @@ async fn rename_vault(
 
 #[tauri::command]
 async fn remove_vault(app: AppHandle, state: State<'_, Desktop>, vault_id: String) -> Reply<()> {
+    let wake = state.wake.clone();
+    let app_rev = state.app_revision.clone();
     dispatch(&state, move |core| {
         core.remove_vault(&vault_id)?;
+        mark_revision(&app_rev, core);
+        let _ = wake.send(watcher::Wake::Refresh);
         changed(&app, "");
         Ok(())
     })
@@ -157,10 +182,12 @@ async fn open_unit(
     asset_id: String,
 ) -> Reply<Vault> {
     let wake = state.wake.clone();
+    let app_rev = state.app_revision.clone();
     dispatch(&state, move |core| {
         let (_, asset) = checked_asset(core, &vault_id, &asset_id)?;
         ensure!(asset.kind != "file", "只有文件夹可以成为整体单元。");
         let unit = core.open_unit(&vault_id, &asset_id)?;
+        mark_revision(&app_rev, core);
         let _ = wake.send(watcher::Wake::One(vault_id));
         let _ = wake.send(watcher::Wake::One(unit.id.clone()));
         changed(&app, "");
@@ -176,11 +203,13 @@ async fn snapshot(state: State<'_, Desktop>, vault_id: String) -> Reply<Snapshot
 
 #[tauri::command]
 async fn rescan(app: AppHandle, state: State<'_, Desktop>, vault_id: String) -> Reply<()> {
+    let app_rev = state.app_revision.clone();
     dispatch(&state, move |core| {
         let result = core.scan(&vault_id);
         if result.is_ok() {
             projection_notice(&app, core, &vault_id, true);
         }
+        mark_revision(&app_rev, core);
         Ok(result?)
     })
     .await
@@ -193,9 +222,11 @@ async fn mutate(
     vault_id: String,
     action: Mutation,
 ) -> Reply<()> {
+    let app_rev = state.app_revision.clone();
     dispatch(&state, move |core| {
         core.mutate(&vault_id, action, "app")?;
         projection_notice(&app, core, &vault_id, true);
+        mark_revision(&app_rev, core);
         changed(&app, &vault_id);
         Ok(())
     })
@@ -234,6 +265,7 @@ async fn save_text(
     revision: String,
     text: String,
 ) -> Reply<()> {
+    let app_rev = state.app_revision.clone();
     dispatch(&state, move |core| {
         let (root, asset) = checked_asset(core, &vault_id, &asset_id)?;
         let identity = asset
@@ -244,9 +276,11 @@ async fn save_text(
         let update = core
             .scan(&vault_id)
             .context("内容已保存，但管理记录未更新。请重新扫描并检查该文件。");
+        mark_revision(&app_rev, core);
         changed(&app, &vault_id);
         update?;
         core.record(&vault_id, "app", &format!("保存文本 · {}", asset.path))?;
+        mark_revision(&app_rev, core);
         Ok(())
     })
     .await
@@ -263,6 +297,7 @@ async fn file_operation(
     confirmed: Option<bool>,
 ) -> Reply<()> {
     let db = state.db.clone();
+    let app_rev = state.app_revision.clone();
     blocking(move || {
         let (root, asset, proposed_destination, outside) = locked(&db, |core| {
             let (root, asset) = checked_asset(core, &vault_id, &asset_id)?;
@@ -312,6 +347,7 @@ async fn file_operation(
                     disk::open_checked(&root, &asset.path, &operation, operation == "run" && confirmed.unwrap_or(false), identity)?;
                     if matches!(operation.as_str(), "default" | "choose" | "run") {
                         core.record(&vault_id, "app", &format!("{} · {}", if operation == "run" {"运行"} else {"打开"}, asset.path))?;
+                        mark_revision(&app_rev, core);
                         changed(&app, &vault_id);
                     }
                     return Ok(());
@@ -320,6 +356,7 @@ async fn file_operation(
             }
             let scan = core.scan(&vault_id);
             if scan.is_ok() { projection_notice(&app, core, &vault_id, false); }
+            mark_revision(&app_rev, core);
             changed(&app, &vault_id);
             scan.context("文件操作已经执行，但重新扫描失败。请不要重复执行，先检查磁盘状态。")?;
             Ok(())
@@ -335,19 +372,18 @@ async fn create_folder(
     parent: String,
     name: String,
 ) -> Reply<String> {
+    let app_rev = state.app_revision.clone();
     dispatch(&state, move |core| {
         let root = core.checked_root(&vault_id)?;
         if !parent.is_empty() {
-            let snapshot = core.snapshot(&vault_id)?;
-            let a = snapshot
-                .assets
-                .iter()
-                .find(|a| a.path == parent && a.kind == "directory" && a.state != "missing")
-                .context("请选择当前管理空间中的普通文件夹")?;
-            checked_asset(core, &vault_id, &a.id)?;
+            ensure!(
+                core.is_live_directory(&vault_id, &parent)?,
+                "请选择当前管理空间中的普通文件夹"
+            );
         }
         let path = disk::mkdir(&root, &parent, &name)?;
         let scan = core.scan(&vault_id);
+        mark_revision(&app_rev, core);
         changed(&app, &vault_id);
         scan.context("已创建文件夹，但重新扫描失败。")?;
         Ok(path)
@@ -359,20 +395,26 @@ async fn create_folder(
 async fn duplicates(state: State<'_, Desktop>, vault_id: String) -> Reply<Vec<Vec<String>>> {
     let (root, paths) = inspect(&state, move |core| {
         let root = core.checked_root(&vault_id)?;
-        let paths: std::collections::HashMap<_, _> = core
-            .snapshot(&vault_id)?
-            .assets
-            .into_iter()
-            .filter(|a| {
-                a.kind == "file"
-                    && !matches!(a.state.as_str(), "excluded" | "missing")
-                    && a.identity.is_some()
-            })
-            .map(|a| (a.path, (a.id, a.identity.unwrap())))
+        let mut by_size = std::collections::HashMap::<u64, Vec<(String, String, String)>>::new();
+        for a in core.snapshot(&vault_id)?.assets {
+            if a.kind == "file" && !matches!(a.state.as_str(), "excluded" | "missing") {
+                if let Some(identity) = a.identity {
+                    by_size.entry(a.size).or_default().push((a.path, a.id, identity));
+                }
+            }
+        }
+        let paths: std::collections::HashMap<_, _> = by_size
+            .into_values()
+            .filter(|bucket| bucket.len() > 1)
+            .flatten()
+            .map(|(path, id, identity)| (path, (id, identity)))
             .collect();
         Ok((root, paths))
     })
     .await?;
+    if paths.len() < 2 {
+        return Ok(Vec::new());
+    }
     blocking(move || {
         let live = |rel: &str, expected: &str| {
             disk::resolve(&root, rel)
@@ -419,6 +461,8 @@ async fn content_matches(
     if query.trim().is_empty() {
         return Ok(Vec::new());
     }
+    let search_gen = state.search_gen.clone();
+    let my_gen = search_gen.fetch_add(1, Ordering::AcqRel) + 1;
     let collections = inspect(&state, move |core| {
         let mut collections = Vec::new();
         for id in vault_ids
@@ -435,10 +479,14 @@ async fn content_matches(
     blocking(move || {
         let mut matches = Vec::new();
         for (id, root, assets) in collections {
-            for a in assets
-                .into_iter()
-                .filter(|a| a.kind == "file" && !matches!(a.state.as_str(), "missing" | "excluded"))
-            {
+            for a in assets.into_iter().filter(|a| {
+                a.kind == "file"
+                    && !matches!(a.state.as_str(), "missing" | "excluded")
+                    && disk::is_searchable_rel(&a.path)
+            }) {
+                if search_gen.load(Ordering::Relaxed) != my_gen {
+                    return Ok(Vec::new());
+                }
                 let Some(expected) = a.identity else {
                     continue;
                 };
@@ -493,15 +541,43 @@ async fn set_agent_access(
     vault_id: String,
     access: String,
 ) -> Reply<()> {
+    let app_rev = state.app_revision.clone();
     dispatch(&state, move |core| {
         core.set_agent_access(&vault_id, &access)?;
+        mark_revision(&app_rev, core);
         changed(&app, &vault_id);
         Ok(())
     })
     .await
 }
 
+fn sweep_stale_preview_temps() {
+    std::thread::spawn(|| {
+        let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+            return;
+        };
+        let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if !(name.starts_with("vaulta-preview-") || name.starts_with("vaulta-slides-")) {
+                continue;
+            }
+            if entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .is_ok_and(|t| t < cutoff)
+            {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    });
+}
+
 fn main() {
+    sweep_stale_preview_temps();
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -511,10 +587,13 @@ fn main() {
         .manage(document_preview::SlidesHost::default())
         .setup(|app| {
             let db = database_path()?;
-            let wake = watcher::start(app.handle().clone(), db.clone());
+            let app_revision = Arc::new(AtomicI64::new(-1));
+            let wake = watcher::start(app.handle().clone(), db.clone(), app_revision.clone());
             app.manage(Desktop {
                 db: db.clone(),
                 wake,
+                app_revision,
+                search_gen: Arc::new(AtomicU64::new(0)),
             });
             window_chrome::open(app, &db)?;
             Ok(())

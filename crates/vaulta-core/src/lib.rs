@@ -68,6 +68,18 @@ fn json<T: DeserializeOwned>(row: &Row<'_>, index: usize) -> rusqlite::Result<T>
         rusqlite::Error::FromSqlConversionFailure(index, rusqlite::types::Type::Text, Box::new(e))
     })
 }
+fn json_empty_default<T: DeserializeOwned + Default>(
+    row: &Row<'_>,
+    index: usize,
+) -> rusqlite::Result<T> {
+    let text = row.get_ref(index)?.as_str()?;
+    if text == "[]" {
+        return Ok(T::default());
+    }
+    serde_json::from_str(text).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(index, rusqlite::types::Type::Text, Box::new(e))
+    })
+}
 
 #[derive(Debug)]
 struct VaultRow {
@@ -118,29 +130,60 @@ impl Core {
     /// Open the shared metadata database; no connection or mutex needs to cross threads.
     pub fn open(db_path: &Path) -> Result<Self> {
         const VERSION: i64 = 2;
+        const EXTRA_INDEXES: &str = "
+            CREATE INDEX IF NOT EXISTS asset_visible_order ON assets(vault_id, path, missing, id) WHERE shadowed = 0;
+            CREATE INDEX IF NOT EXISTS asset_by_category ON assets(vault_id, category_id);
+            CREATE INDEX IF NOT EXISTS asset_units ON assets(vault_id, path, identity) WHERE kind = 'unit';
+            CREATE INDEX IF NOT EXISTS asset_by_path ON assets(vault_id, path);
+            CREATE INDEX IF NOT EXISTS history_undoable ON history(vault_id, seq DESC) WHERE undone = 0 AND undo IS NOT NULL;
+        ";
         let mut db = Connection::open(db_path)?;
         db.busy_timeout(Duration::from_secs(8))?;
         db.pragma_update(None, "foreign_keys", "ON")?;
+        db.pragma_update(None, "temp_store", "MEMORY")?;
+        db.pragma_update(None, "cache_size", -32000)?;
+        let mode: String = db.pragma_query_value(None, "journal_mode", |r| r.get(0))?;
+        if !mode.eq_ignore_ascii_case("wal") && !mode.eq_ignore_ascii_case("memory") {
+            let _ = db.query_row("PRAGMA journal_mode = WAL", [], |r| r.get::<_, String>(0));
+        }
+        db.pragma_update(None, "synchronous", "NORMAL")?;
         let version = db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))?;
         if version != VERSION {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            match tx.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))? {
-                0 => tx.execute_batch(include_str!("schema.sql"))?,
-                1 => {
-                    // v2 adds the classifier buckets, suggests a category for
-                    // existing files, and adopts the inventory that older
-                    // versions already showed. New files still wait in the inbox.
-                    metadata::auto_categorize(&tx)?;
-                    tx.execute("UPDATE settings SET revision=revision+1 WHERE id=1", [])?;
+            let current = tx.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))?;
+            if current != VERSION {
+                match current {
+                    0 => tx.execute_batch(include_str!("schema.sql"))?,
+                    1 => {
+                        // v2 adds the classifier buckets, suggests a category for
+                        // existing files, and adopts the inventory that older
+                        // versions already showed. New files still wait in the inbox.
+                        metadata::auto_categorize(&tx)?;
+                        tx.execute_batch(EXTRA_INDEXES)?;
+                        tx.execute("UPDATE settings SET revision=revision+1 WHERE id=1", [])?;
+                    }
+                    other => {
+                        return Err(invalid(format!(
+                            "unsupported Vaulta database version {other}"
+                        )))
+                    }
                 }
-                other => {
-                    return Err(invalid(format!(
-                        "unsupported Vaulta database version {other}"
-                    )))
-                }
+                tx.pragma_update(None, "user_version", VERSION)?;
             }
-            tx.pragma_update(None, "user_version", VERSION)?;
             tx.commit()?;
+        } else {
+            let count: i64 = db.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name IN (
+                    'asset_visible_order','asset_by_category','asset_units','asset_by_path','history_undoable'
+                 )",
+                [],
+                |r| r.get(0),
+            )?;
+            if count < 5 {
+                let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                tx.execute_batch(EXTRA_INDEXES)?;
+                tx.commit()?;
+            }
         }
         Ok(Self { db })
     }
@@ -208,11 +251,16 @@ impl Core {
         if !original.physical.directory {
             return Err(invalid("vault root must be a directory"));
         }
-        let root = dunce::canonicalize(&absolute).map_err(|e| Error::Filesystem(absolute, e))?;
-        let guard = filesystem::guarded(&root)?;
-        if guard.physical.identity != original.physical.identity {
-            return Err(invalid("vault root changed while being registered"));
-        }
+        let root = dunce::canonicalize(&absolute).map_err(|e| Error::Filesystem(absolute.clone(), e))?;
+        let guard = if root == absolute {
+            original
+        } else {
+            let guard = filesystem::guarded(&root)?;
+            if guard.physical.identity != original.physical.identity {
+                return Err(invalid("vault root changed while being registered"));
+            }
+            guard
+        };
         // A metadata-only handle need not imply the root is listable.
         std::fs::read_dir(&root).map_err(|e| Error::Filesystem(root.clone(), e))?;
         let root_text = root
@@ -237,18 +285,13 @@ impl Core {
         };
         let mut reattach = None;
         for (id, path, key, active) in roots {
-            if key == guard.physical.identity
-                && path_starts(&root, &path)
-                && path_starts(&path, &root)
-            {
+            if key == guard.physical.identity && paths_equal(&root, &path) {
                 if active {
                     return Err(invalid("this root is already registered"));
                 }
                 reattach = Some(id);
             } else if active
-                && (key == guard.physical.identity
-                    || path_starts(&root, &path)
-                    || path_starts(&path, &root))
+                && (key == guard.physical.identity || paths_overlap(&root, &path))
             {
                 return Err(invalid("vault root overlaps a registered vault"));
             }
@@ -361,6 +404,18 @@ impl Core {
         Ok(asset)
     }
 
+    pub fn is_live_directory(&self, vault_id: &str, path: &str) -> Result<bool> {
+        let tx = self.db.unchecked_transaction()?;
+        binding(&tx, vault_id)?;
+        let exists = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM assets WHERE vault_id=?1 AND path=?2 AND missing=0 AND shadowed=0 AND kind='directory' AND state<>'excluded')",
+            params![vault_id, path],
+            |r| r.get::<_, bool>(0),
+        )?;
+        tx.commit()?;
+        Ok(exists)
+    }
+
     pub fn record(&mut self, vault_id: &str, source: &str, message: &str) -> Result<()> {
         let tx = self.write()?;
         binding(&tx, vault_id)?;
@@ -410,6 +465,33 @@ impl rusqlite::types::FromSql for PathBufString {
     fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
         Ok(Self(value.as_str()?.into()))
     }
+}
+
+fn comparison_path(path: &Path) -> std::borrow::Cow<'_, Path> {
+    let Some(text) = path.to_str() else {
+        return std::borrow::Cow::Borrowed(path);
+    };
+    match text.strip_prefix(r"\\?\") {
+        Some(path)
+            if path
+                .get(..4)
+                .is_some_and(|p| p.eq_ignore_ascii_case(r"UNC\")) =>
+        {
+            std::borrow::Cow::Owned(format!(r"\\{}", &path[4..]).into())
+        }
+        Some(path) => std::borrow::Cow::Borrowed(Path::new(path)),
+        None => std::borrow::Cow::Borrowed(Path::new(text)),
+    }
+}
+
+pub(crate) fn paths_overlap(a: &Path, b: &Path) -> bool {
+    let (a, b) = (comparison_path(a), comparison_path(b));
+    path_starts(&a, &b) || path_starts(&b, &a)
+}
+
+pub(crate) fn paths_equal(a: &Path, b: &Path) -> bool {
+    let (a, b) = (comparison_path(a), comparison_path(b));
+    path_starts(&a, &b) && path_starts(&b, &a)
 }
 
 fn path_starts(path: &Path, prefix: &Path) -> bool {
@@ -487,8 +569,8 @@ fn read_asset(r: &Row<'_>) -> rusqlite::Result<Asset> {
         modified: r.get(4)?,
         created: r.get(5)?,
         category_id: r.get(6)?,
-        tags: json(r, 7)?,
-        flags: json(r, 8)?,
+        tags: json_empty_default(r, 7)?,
+        flags: json_empty_default(r, 8)?,
         state: r.get(9)?,
         identity: r.get(10)?,
     })

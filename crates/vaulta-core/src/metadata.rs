@@ -17,13 +17,6 @@ struct View {
     categories: BTreeSet<String>,
 }
 
-struct Metadata {
-    categories: BTreeMap<String, Category>,
-    tags: BTreeSet<String>,
-    assets: BTreeMap<String, Organization>,
-    view: View,
-}
-
 #[derive(Serialize, Deserialize)]
 struct Delta<T> {
     before: T,
@@ -47,34 +40,50 @@ impl Patch {
     }
 
     fn apply(&self, db: &Connection, vault: &str, reverse: bool) -> Result<()> {
-        for (id, delta) in &self.categories {
-            let desired = if reverse { &delta.before } else { &delta.after };
-            if let Some(c) = desired {
-                db.execute("INSERT INTO categories(vault_id,id,name,parent_id) VALUES(?1,?2,?3,?4)
-                    ON CONFLICT(vault_id,id) DO UPDATE SET name=excluded.name,parent_id=excluded.parent_id", params![vault, id, c.name, c.parent_id])?;
-            } else {
-                db.execute(
-                    "DELETE FROM categories WHERE vault_id=?1 AND id=?2",
-                    params![vault, id],
-                )?;
+        if !self.categories.is_empty() {
+            let mut upsert = db.prepare_cached(
+                "INSERT INTO categories(vault_id,id,name,parent_id) VALUES(?1,?2,?3,?4)
+                 ON CONFLICT(vault_id,id) DO UPDATE SET name=excluded.name,parent_id=excluded.parent_id",
+            )?;
+            let mut delete =
+                db.prepare_cached("DELETE FROM categories WHERE vault_id=?1 AND id=?2")?;
+            for (id, delta) in &self.categories {
+                let desired = if reverse { &delta.before } else { &delta.after };
+                if let Some(c) = desired {
+                    upsert.execute(params![vault, id, c.name, c.parent_id])?;
+                } else {
+                    delete.execute(params![vault, id])?;
+                }
             }
         }
-        for (tag, delta) in &self.tags {
-            if if reverse { delta.before } else { delta.after } {
-                db.execute(
-                    "INSERT INTO tags(vault_id,name) VALUES(?1,?2)",
-                    params![vault, tag],
-                )?;
-            } else {
-                db.execute(
-                    "DELETE FROM tags WHERE vault_id=?1 AND name=?2",
-                    params![vault, tag],
-                )?;
+        if !self.tags.is_empty() {
+            let mut insert =
+                db.prepare_cached("INSERT INTO tags(vault_id,name) VALUES(?1,?2)")?;
+            let mut delete =
+                db.prepare_cached("DELETE FROM tags WHERE vault_id=?1 AND name=?2")?;
+            for (tag, delta) in &self.tags {
+                if if reverse { delta.before } else { delta.after } {
+                    insert.execute(params![vault, tag])?;
+                } else {
+                    delete.execute(params![vault, tag])?;
+                }
             }
         }
-        for (asset, delta) in &self.assets {
-            let o = if reverse { &delta.before } else { &delta.after };
-            db.execute("UPDATE assets SET category_id=?3,tags=?4,flags=?5,state=?6 WHERE vault_id=?1 AND id=?2", params![vault,asset,o.category_id,encode(&o.tags)?,encode(&o.flags)?,o.state])?;
+        if !self.assets.is_empty() {
+            let mut update = db.prepare_cached(
+                "UPDATE assets SET category_id=?3,tags=?4,flags=?5,state=?6 WHERE vault_id=?1 AND id=?2",
+            )?;
+            for (asset, delta) in &self.assets {
+                let o = if reverse { &delta.before } else { &delta.after };
+                update.execute(params![
+                    vault,
+                    asset,
+                    o.category_id,
+                    encode(&o.tags)?,
+                    encode(&o.flags)?,
+                    o.state
+                ])?;
+            }
         }
         if let Some(delta) = &self.view {
             let v = if reverse { &delta.before } else { &delta.after };
@@ -183,17 +192,18 @@ pub(crate) fn auto_categorize(db: &Connection) -> Result<()> {
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             rows
         };
-        for (asset, path) in pending {
-            let Some(category) = classify::category_for(&path)
-                .and_then(|label| categories.get(label))
-                .cloned()
-            else {
-                continue;
-            };
-            db.execute(
+        {
+            let mut update = db.prepare_cached(
                 "UPDATE assets SET category_id=?2 WHERE id=?1 AND category_id IS NULL",
-                params![asset, category],
             )?;
+            for (asset, path) in pending {
+                let Some(category) = classify::category_for(&path)
+                    .and_then(|label| categories.get(label))
+                else {
+                    continue;
+                };
+                update.execute(params![asset, category])?;
+            }
         }
         db.execute(
             "UPDATE assets SET state='filed' WHERE vault_id=?1 AND state='inbox' AND missing=0 AND shadowed=0",
@@ -236,19 +246,31 @@ fn category_map(db: &Connection, vault: &str) -> Result<BTreeMap<String, Categor
 fn org(r: &Row<'_>, i: usize) -> rusqlite::Result<Organization> {
     Ok(Organization {
         category_id: r.get(i)?,
-        tags: json(r, i + 1)?,
-        flags: json(r, i + 2)?,
+        tags: json_empty_default(r, i + 1)?,
+        flags: json_empty_default(r, i + 2)?,
         state: r.get(i + 3)?,
     })
 }
 
-fn all_org(db: &Connection, vault: &str) -> Result<BTreeMap<String, Organization>> {
-    let mut stmt =
-        db.prepare("SELECT id,category_id,tags,flags,state FROM assets WHERE vault_id=?1")?;
-    let rows = stmt
-        .query_map([vault], |r| Ok((r.get(0)?, org(r, 1)?)))?
-        .collect::<rusqlite::Result<_>>()?;
-    Ok(rows)
+fn category_exists(db: &Connection, vault: &str, id: &str) -> Result<()> {
+    let exists: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM categories WHERE vault_id=?1 AND id=?2)",
+        params![vault, id],
+        |r| r.get(0),
+    )?;
+    if exists {
+        Ok(())
+    } else {
+        Err(missing("category", id))
+    }
+}
+
+fn tag_exists(db: &Connection, vault: &str, tag: &str) -> Result<bool> {
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM tags WHERE vault_id=?1 AND name=?2)",
+        params![vault, tag],
+        |r| r.get(0),
+    )?)
 }
 
 fn asset_delta(patch: &mut Patch, id: String, before: Organization, after: Organization) {
@@ -297,19 +319,19 @@ fn prepare(db: &Connection, vault: &Vault, action: Mutation, patch: &mut Patch) 
                 ));
             }
             if let Some(Some(category)) = &category_id {
-                require_category(&category_map(db, vid)?, category)?;
+                category_exists(db, vid, category)?;
             }
             let ids: BTreeSet<_> = ids.into_iter().collect();
             let add_tags = names(add_tags)?;
             let remove_tags = names(remove_tags)?;
             let add_flags = names(add_flags)?;
             let remove_flags = names(remove_flags)?;
-            let mut stmt = db.prepare("SELECT path,category_id,tags,flags,state FROM assets WHERE vault_id=?1 AND id=?2 AND missing=0 AND shadowed=0")?;
+            let mut stmt = db.prepare_cached("SELECT kind,path,category_id,tags,flags,state FROM assets WHERE vault_id=?1 AND id=?2 AND missing=0 AND shadowed=0")?;
             let mut auto_categories: Option<HashMap<String, String>> = None;
             for asset in &ids {
-                let (path, before) = stmt
+                let (kind, path, before) = stmt
                     .query_row(params![vid, asset], |r| {
-                        Ok((r.get::<_, String>(0)?, org(r, 1)?))
+                        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, org(r, 2)?))
                     })
                     .optional()?
                     .ok_or_else(|| missing("live asset", asset))?;
@@ -323,7 +345,8 @@ fn prepare(db: &Connection, vault: &Vault, action: Mutation, patch: &mut Patch) 
                 // Filing is the point where an unclassified file gets the best
                 // category we can name. An explicit "uncategorized" choice is
                 // preserved because it arrives through category_id.
-                if category_id.is_none()
+                if kind == "file"
+                    && category_id.is_none()
                     && state.as_deref() == Some("filed")
                     && after.category_id.is_none()
                 {
@@ -413,12 +436,16 @@ fn prepare(db: &Connection, vault: &Vault, action: Mutation, patch: &mut Patch) 
                 );
             }
             validate_categories(&updated)?;
-            for (key, before) in all_org(db, vid)? {
-                if before.category_id.as_deref() == Some(&id) {
-                    let mut after = before.clone();
-                    after.category_id.clone_from(&reassign_to);
-                    asset_delta(patch, key, before, after);
-                }
+            let mut stmt = db.prepare_cached(
+                "SELECT id,category_id,tags,flags,state FROM assets WHERE vault_id=?1 AND category_id=?2",
+            )?;
+            let affected = stmt
+                .query_map(params![vid, id], |r| Ok((r.get::<_, String>(0)?, org(r, 1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for (key, before) in affected {
+                let mut after = before.clone();
+                after.category_id.clone_from(&reassign_to);
+                asset_delta(patch, key, before, after);
             }
             let before = view_of(vault);
             if before.categories.contains(&id) {
@@ -440,7 +467,7 @@ fn prepare(db: &Connection, vault: &Vault, action: Mutation, patch: &mut Patch) 
         }
         Mutation::TagCreate { name: tag } => {
             let tag = name(&tag)?;
-            if !tags(db, vid)?.iter().any(|s| s == tag) {
+            if !tag_exists(db, vid, tag)? {
                 patch.tags.insert(
                     tag.into(),
                     Delta {
@@ -456,12 +483,11 @@ fn prepare(db: &Connection, vault: &Vault, action: Mutation, patch: &mut Patch) 
             new_name: new,
         } => {
             let (old, new) = (name(&old)?, name(&new)?);
-            let existing = tags(db, vid)?;
-            if !existing.iter().any(|t| t == old) {
+            if !tag_exists(db, vid, old)? {
                 return Err(missing("tag", old));
             }
             if old != new {
-                if existing.iter().any(|t| t == new) {
+                if tag_exists(db, vid, new)? {
                     return Err(invalid("the new tag name is already in use"));
                 }
                 change_tag(db, vid, old, Some(new), patch)?;
@@ -470,7 +496,7 @@ fn prepare(db: &Connection, vault: &Vault, action: Mutation, patch: &mut Patch) 
         }
         Mutation::TagDelete { name: tag } => {
             let tag = name(&tag)?;
-            if !tags(db, vid)?.iter().any(|t| t == tag) {
+            if !tag_exists(db, vid, tag)? {
                 return Err(missing("tag", tag));
             }
             change_tag(db, vid, tag, None, patch)?;
@@ -505,7 +531,15 @@ fn change_tag(
     new: Option<&str>,
     patch: &mut Patch,
 ) -> Result<()> {
-    for (key, before) in all_org(db, vault)? {
+    let mut stmt = db.prepare_cached(
+        "SELECT id,category_id,tags,flags,state FROM assets
+         WHERE vault_id=?1 AND tags<>'[]'
+           AND EXISTS(SELECT 1 FROM json_each(assets.tags) WHERE value=?2)",
+    )?;
+    let affected = stmt
+        .query_map(params![vault, old], |r| Ok((r.get::<_, String>(0)?, org(r, 1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (key, before) in affected {
         if before.tags.contains(old) {
             let mut after = before.clone();
             after.tags.remove(old);
@@ -565,16 +599,12 @@ fn undo(db: &Connection, vault: &str, source: &str) -> Result<bool> {
     let Some((seq, message, patch)) = entry else {
         return Ok(false);
     };
-    let current = Metadata {
-        categories: category_map(db, vault)?,
-        tags: tags(db, vault)?.into_iter().collect(),
-        assets: all_org(db, vault)?,
-        view: view_of(&row(db, vault)?.vault),
-    };
     let conflict = || invalid("metadata no longer matches the operation to undo");
-    let mut categories = current.categories;
-    let mut tags = current.tags;
-    let mut assets = current.assets;
+    let mut categories = category_map(db, vault)?;
+    let mut tags: BTreeSet<String> = tags(db, vault)?.into_iter().collect();
+    let current_view = view_of(&row(db, vault)?.vault);
+
+    let mut removed_categories = Vec::new();
     for (id, d) in &patch.categories {
         if categories.get(id) != d.after.as_ref() {
             return Err(conflict());
@@ -583,8 +613,10 @@ fn undo(db: &Connection, vault: &str, source: &str) -> Result<bool> {
             categories.insert(id.clone(), before.clone());
         } else {
             categories.remove(id);
+            removed_categories.push(id.as_str());
         }
     }
+    let mut removed_tags = Vec::new();
     for (tag, d) in &patch.tags {
         if tags.contains(tag) != d.after {
             return Err(conflict());
@@ -593,32 +625,71 @@ fn undo(db: &Connection, vault: &str, source: &str) -> Result<bool> {
             tags.insert(tag.clone());
         } else {
             tags.remove(tag);
+            removed_tags.push(tag.as_str());
         }
     }
-    for (id, d) in &patch.assets {
-        if assets.get(id) != Some(&d.after) {
-            return Err(conflict());
+    if !patch.assets.is_empty() {
+        let mut stmt = db.prepare_cached(
+            "SELECT category_id,tags,flags,state FROM assets WHERE vault_id=?1 AND id=?2",
+        )?;
+        for (id, d) in &patch.assets {
+            let current = stmt
+                .query_row(params![vault, id], |r| org(r, 0))
+                .optional()?;
+            if current.as_ref() != Some(&d.after) {
+                return Err(conflict());
+            }
+            if d.before
+                .category_id
+                .as_ref()
+                .is_some_and(|cid| !categories.contains_key(cid))
+                || !d.before.tags.is_subset(&tags)
+            {
+                return Err(conflict());
+            }
         }
-        assets.insert(id.clone(), d.before.clone());
     }
     let view = match &patch.view {
-        Some(d) if current.view == d.after => &d.before,
+        Some(d) if current_view == d.after => &d.before,
         Some(_) => return Err(conflict()),
-        None => &current.view,
+        None => &current_view,
     };
     validate_categories(&categories)?;
     if view
         .categories
         .iter()
         .any(|id| !categories.contains_key(id))
-        || assets.values().any(|a| {
-            a.category_id
-                .as_ref()
-                .is_some_and(|id| !categories.contains_key(id))
-                || !a.tags.is_subset(&tags)
-        })
     {
         return Err(conflict());
+    }
+    if !removed_categories.is_empty() {
+        let mut stmt = db.prepare_cached(
+            "SELECT id FROM assets WHERE vault_id=?1 AND category_id=?2",
+        )?;
+        for cid in removed_categories {
+            let mut rows = stmt.query(params![vault, cid])?;
+            while let Some(row) = rows.next()? {
+                let asset_id: String = row.get(0)?;
+                if !patch.assets.contains_key(&asset_id) {
+                    return Err(conflict());
+                }
+            }
+        }
+    }
+    if !removed_tags.is_empty() {
+        let mut stmt = db.prepare_cached(
+            "SELECT id FROM assets WHERE vault_id=?1 AND tags<>'[]'
+             AND EXISTS(SELECT 1 FROM json_each(assets.tags) WHERE value=?2)",
+        )?;
+        for tag in removed_tags {
+            let mut rows = stmt.query(params![vault, tag])?;
+            while let Some(row) = rows.next()? {
+                let asset_id: String = row.get(0)?;
+                if !patch.assets.contains_key(&asset_id) {
+                    return Err(conflict());
+                }
+            }
+        }
     }
     patch.apply(db, vault, true)?;
     db.execute("UPDATE history SET undone=1 WHERE seq=?1", [seq])?;

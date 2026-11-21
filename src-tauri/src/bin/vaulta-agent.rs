@@ -5,9 +5,13 @@ use std::{
     io::{self, Read},
     process::ExitCode,
 };
-use vaulta::{database_path, locked};
+use vaulta::{database_path, locked, read};
 
-const HELP: &str = "vaulta-agent 0.1 — 本地 JSON 协议 v1\n\n用法：\n  vaulta-agent list\n  vaulta-agent snapshot <vault-id>\n  vaulta-agent mutate <vault-id>    从标准输入读取单条 JSON 操作\n\n需要先在 Vaulta 的仓库设置授予对应仓库的 Agent 权限。";
+const HELP: &str = concat!(
+    "vaulta-agent ",
+    env!("CARGO_PKG_VERSION"),
+    " — 本地 JSON 协议 v1\n\n用法：\n  vaulta-agent list\n  vaulta-agent snapshot <vault-id>\n  vaulta-agent mutate <vault-id>    从标准输入读取单条 JSON 操作\n\n需要先在 Vaulta 的仓库设置授予对应仓库的 Agent 权限。"
+);
 
 fn run() -> Result<Option<Value>> {
     let mut args = env::args().skip(1);
@@ -30,7 +34,7 @@ fn run() -> Result<Option<Value>> {
         if !database.exists() {
             return Ok(Some(json!({"protocol": 1, "vaults": []})));
         }
-        return locked(&database, |core| {
+        return read(&database, |core| {
             let mut out = Vec::new();
             for vault in core.vaults()? {
                 let access = core.agent_access(&vault.id)?;
@@ -71,19 +75,23 @@ fn run() -> Result<Option<Value>> {
     } else {
         None
     };
-    locked(&database, |core| {
-        let access = core.agent_access(&id)?;
-        ensure!(access != "off", "该仓库未授予 Agent 访问权限");
-        if let Some(action) = action {
+    if let Some(action) = action {
+        locked(&database, |core| {
+            let access = core.agent_access(&id)?;
+            ensure!(access != "off", "该仓库未授予 Agent 访问权限");
             ensure!(access == "write", "该仓库只授予了读取权限");
             core.mutate(&id, action, "agent")?;
             Ok(Some(json!({"protocol": 1, "ok": true})))
-        } else {
+        })
+    } else {
+        read(&database, |core| {
+            let access = core.agent_access(&id)?;
+            ensure!(access != "off", "该仓库未授予 Agent 访问权限");
             Ok(Some(
                 json!({"protocol": 1, "snapshot": core.snapshot(&id)?}),
             ))
-        }
-    })
+        })
+    }
 }
 
 fn main() -> ExitCode {

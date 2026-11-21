@@ -9,7 +9,11 @@ use std::{
     io::Write,
     os::windows::ffi::OsStrExt,
     path::Path,
-    sync::{Arc, Mutex, mpsc},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc,
+    },
     thread,
     time::{Duration, SystemTime},
 };
@@ -17,7 +21,7 @@ use tauri::{State, WebviewWindow};
 use vaulta_fs::RenderSource;
 use windows::{
     Win32::{
-        Foundation::{HWND, RECT},
+        Foundation::{HWND, LPARAM, RECT, WPARAM},
         System::Com::{
             CLSCTX_LOCAL_SERVER, CLSIDFromString, COINIT_APARTMENTTHREADED, CoCreateInstance,
             CoInitializeEx, CoUninitialize, STGM_READ,
@@ -31,9 +35,10 @@ use windows::{
             },
             WindowsAndMessaging::{
                 CreateWindowExW, DestroyWindow, DispatchMessageW, GetClientRect, HWND_TOP,
-                IsWindow, MSG, PM_REMOVE, PeekMessageW, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW,
-                SetWindowPos, ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WS_CHILD,
-                WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
+                IsWindow, MSG, MsgWaitForMultipleObjects, PM_REMOVE, PeekMessageW, PostMessageW,
+                QS_ALLINPUT, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowPos, ShowWindow,
+                TranslateMessage, WINDOW_EX_STYLE, WM_APP, WS_CHILD, WS_CLIPCHILDREN,
+                WS_CLIPSIBLINGS,
             },
         },
     },
@@ -78,6 +83,27 @@ struct DownloadPrompt {
 pub struct Worker {
     send: mpsc::SyncSender<Open>,
     layout: Arc<Mutex<Layout>>,
+    surface: Arc<AtomicUsize>,
+    alive: Arc<AtomicBool>,
+}
+
+impl Worker {
+    fn wake(&self) {
+        let hwnd = self.surface.load(Ordering::Acquire);
+        if hwnd != 0 {
+            unsafe {
+                let _ = PostMessageW(Some(HWND(hwnd as _)), WM_APP, WPARAM(0), LPARAM(0));
+            }
+        }
+    }
+}
+
+struct AliveGuard(Arc<AtomicBool>, Arc<AtomicUsize>);
+impl Drop for AliveGuard {
+    fn drop(&mut self) {
+        self.1.store(0, Ordering::Release);
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 #[derive(Default)]
@@ -90,22 +116,45 @@ impl OfficeHost {
             .lock()
             .map_err(|_| anyhow::anyhow!("Office 预览器不可用。"))?;
         if let Some(worker) = worker.as_ref() {
-            return Ok(worker.clone());
+            if worker.alive.load(Ordering::Acquire) {
+                return Ok(worker.clone());
+            }
         }
         let parent = window.hwnd()?.0 as usize;
         let (send, recv) = mpsc::sync_channel(1);
         let layout = Arc::new(Mutex::new(Layout::default()));
+        let surface = Arc::new(AtomicUsize::new(0));
+        let alive = Arc::new(AtomicBool::new(true));
         let thread_layout = layout.clone();
+        let thread_surface = surface.clone();
+        let thread_alive = alive.clone();
         thread::Builder::new()
             .name("vaulta-office-preview".into())
             .spawn(move || {
-                if let Err(error) = run(parent, recv, thread_layout) {
+                let _guard = AliveGuard(thread_alive, thread_surface.clone());
+                if let Err(error) = run(parent, recv, thread_layout, thread_surface) {
                     eprintln!("vaulta: {error:#}");
                 }
             })?;
-        let active = Worker { send, layout };
+        let active = Worker {
+            send,
+            layout,
+            surface,
+            alive,
+        };
         *worker = Some(active.clone());
         Ok(active)
+    }
+
+    fn existing_worker(&self) -> Result<Option<Worker>> {
+        let worker = self
+            .0
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Office 预览器不可用。"))?;
+        Ok(worker
+            .as_ref()
+            .filter(|w| w.alive.load(Ordering::Acquire))
+            .cloned())
     }
 }
 
@@ -126,6 +175,7 @@ impl Worker {
                 reply,
             })
             .map_err(|_| anyhow::anyhow!("Office 预览器正在处理其他文件，请重试。"))?;
+        self.wake();
         result
             .recv_timeout(Duration::from_secs(15))
             .context("Office 预览器未及时响应。")?
@@ -141,15 +191,25 @@ pub fn office_preview_layout(
     bounds: Option<Bounds>,
 ) -> Reply<()> {
     main_window(&window).map_err(|e| e.to_string())?;
-    let worker = office.worker(&window).map_err(|e| e.to_string())?;
-    let mut layout = worker.layout.lock().map_err(|_| "Office 预览器不可用。")?;
-    if seq >= layout.seq {
-        *layout = Layout {
-            seq,
-            session,
-            bounds,
+    let worker = if session.is_none() {
+        let Some(worker) = office.existing_worker().map_err(|e| e.to_string())? else {
+            return Ok(());
         };
+        worker
+    } else {
+        office.worker(&window).map_err(|e| e.to_string())?
+    };
+    {
+        let mut layout = worker.layout.lock().map_err(|_| "Office 预览器不可用。")?;
+        if seq >= layout.seq {
+            *layout = Layout {
+                seq,
+                session,
+                bounds,
+            };
+        }
     }
+    worker.wake();
     Ok(())
 }
 
@@ -182,7 +242,12 @@ impl Drop for Preview {
     }
 }
 
-fn run(parent: usize, recv: mpsc::Receiver<Open>, shared: Arc<Mutex<Layout>>) -> Result<()> {
+fn run(
+    parent: usize,
+    recv: mpsc::Receiver<Open>,
+    shared: Arc<Mutex<Layout>>,
+    surface_slot: Arc<AtomicUsize>,
+) -> Result<()> {
     unsafe {
         CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
     }
@@ -204,6 +269,7 @@ fn run(parent: usize, recv: mpsc::Receiver<Open>, shared: Arc<Mutex<Layout>>) ->
             None,
         )?
     });
+    surface_slot.store(surface.0.0 as usize, Ordering::Release);
     let mut current: Option<(u64, Preview)> = None;
     let mut last = None;
     let mut download_prompt = None;
@@ -250,7 +316,7 @@ fn run(parent: usize, recv: mpsc::Receiver<Open>, shared: Arc<Mutex<Layout>>) ->
                 last = bounds;
             }
         }
-        match recv.recv_timeout(Duration::from_millis(16)) {
+        match recv.try_recv() {
             Ok(Open {
                 session,
                 source,
@@ -295,9 +361,14 @@ fn run(parent: usize, recv: mpsc::Receiver<Open>, shared: Arc<Mutex<Layout>>) ->
                 if reply.send(result).is_err() {
                     current = None;
                 }
+                continue;
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            Err(mpsc::RecvTimeoutError::Timeout) => (),
+            Err(mpsc::TryRecvError::Disconnected) => break,
+            Err(mpsc::TryRecvError::Empty) => (),
+        }
+        let wait_ms = if current.is_some() { 1000 } else { 5000 };
+        unsafe {
+            let _ = MsgWaitForMultipleObjects(None, false, wait_ms, QS_ALLINPUT);
         }
     }
     Ok(())

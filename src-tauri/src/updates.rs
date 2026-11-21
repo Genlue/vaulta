@@ -71,7 +71,9 @@ pub(crate) async fn check_update(
 ) -> Result<UpdateStatus, String> {
     let _operation = state.start()?;
     let current = app.package_info().version.to_string();
-    let installable = nsis_install();
+    let installable = tauri::async_runtime::spawn_blocking(nsis_install)
+        .await
+        .unwrap_or(false);
     let updater = app
         .updater_builder()
         .timeout(Duration::from_secs(20))
@@ -109,7 +111,10 @@ pub(crate) async fn install_update(
     version: String,
 ) -> Result<(), String> {
     let _operation = state.start()?;
-    if !nsis_install() {
+    let installable = tauri::async_runtime::spawn_blocking(nsis_install)
+        .await
+        .unwrap_or(false);
+    if !installable {
         return Err("便携版请从发布页下载新版。".into());
     }
     let mut update = state
@@ -129,22 +134,26 @@ pub(crate) async fn install_update(
 
 #[tauri::command]
 pub(crate) async fn open_update_releases() -> Result<(), String> {
-    use windows_sys::Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL};
-    use windows_sys::core::w;
-    let url: Vec<u16> = RELEASE_PAGE.encode_utf16().chain([0]).collect();
-    // The frontend cannot supply a URL or a local executable to this command.
-    let result = unsafe {
-        ShellExecuteW(
-            std::ptr::null_mut(),
-            w!("open"),
-            url.as_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            SW_SHOWNORMAL,
-        )
-    };
-    if result as isize <= 32 {
-        return Err("无法打开 GitHub 发布页面。".into());
-    }
-    Ok(())
+    tauri::async_runtime::spawn_blocking(|| {
+        use windows_sys::Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL};
+        use windows_sys::core::w;
+        let url: Vec<u16> = RELEASE_PAGE.encode_utf16().chain([0]).collect();
+        // The frontend cannot supply a URL or a local executable to this command.
+        let result = unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                w!("open"),
+                url.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        if result as isize <= 32 {
+            return Err("无法打开 GitHub 发布页面。".into());
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("无法打开 GitHub 发布页面：{e}"))?
 }

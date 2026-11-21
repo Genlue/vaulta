@@ -264,7 +264,11 @@ impl IFileOperationProgressSink_Impl for RecycleSink_Impl {
                 CoTaskMemFree(Some(p.0.cast()));
             }
             let name = name.map_err(|_| WinError::from_hresult(E_ABORT))?;
-            if Path::new(&name) != dos(&self.path) {
+            let expected_dos = dos(&self.path);
+            let same_path = expected_dos
+                .to_str()
+                .map_or_else(|| Path::new(&name) == expected_dos, |s| name.eq_ignore_ascii_case(s));
+            if !same_path {
                 return Ok(false);
             }
             let result = file_open(
@@ -405,14 +409,18 @@ fn check_subtree(dir: &Dir, depth: usize, visited: &mut usize) -> Result<()> {
         {
             return Err(Error::InvalidPath(path.display().to_string()));
         }
-        let file = file_open(
-            &path,
-            FILE_READ_ATTRIBUTES.0,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            OPEN_EXISTING,
-        )?;
-        if real(&file, &path)? {
+        if entry.file_type().is_ok_and(|t| t.is_dir()) {
             check_subtree(&dir.child(&entry.file_name(), false)?, depth + 1, visited)?;
+        } else {
+            let file = file_open(
+                &path,
+                FILE_READ_ATTRIBUTES.0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                OPEN_EXISTING,
+            )?;
+            if real(&file, &path)? {
+                check_subtree(&dir.child(&entry.file_name(), false)?, depth + 1, visited)?;
+            }
         }
     }
     Ok(())
@@ -427,8 +435,12 @@ pub fn recycle_checked(root: &Path, rel: &str, expected_identity: &str) -> Resul
 }
 fn recycle_impl(root: &Path, rel: &str, expected_identity: Option<&str>) -> Result<()> {
     let asset = Asset::open(root, rel, 0, FILE_SHARE_READ | FILE_SHARE_DELETE)?;
-    verify(&asset.file, &asset.path, expected_identity)?;
     let expected = identity_key(&asset.file, &asset.path)?;
+    if let Some(wanted) = expected_identity {
+        if expected != wanted {
+            return Err(Error::Conflict);
+        }
+    }
     if asset.is_dir {
         let child = asset.parent.child(asset.path.file_name().unwrap(), false)?;
         verify(child.handle(), &child.path, Some(&expected))?;

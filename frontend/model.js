@@ -11,7 +11,12 @@ export const relative = (root, path) => {
 export const containsPath = (root, path) => pathKey(root) === pathKey(path) || pathKey(path).startsWith(`${pathKey(root)}/`);
 export const collator = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' });
 export const arr = value => Array.isArray(value) ? value : [];
-export const assetKey = item => JSON.stringify(item.synthetic ? [item.vaultId, null, pathKey(item.rel)] : [item.vaultId, item.id]);
+export const assetKey = item => {
+  if (item?._key) return item._key;
+  const key = JSON.stringify(item.synthetic ? [item.vaultId, null, pathKey(item.rel)] : [item.vaultId, item.id]);
+  if (item && typeof item === 'object') item._key = key;
+  return key;
+};
 export const isDir = item => item?.kind === 'unit' || item?.kind === 'directory';
 export const systemState = { inbox: '待入库', filed: '已入库', excluded: '已排除', missing: '已缺失' };
 export const states = Object.keys(systemState);
@@ -65,18 +70,29 @@ function fileKind(ext) {
   return null;
 }
 export function assetType(item) {
-  if (item.kind === 'unit') return { icon: 'layers', tone: 'violet', name: '整体单元', group: 'folder' };
-  if (item.kind === 'directory') return { icon: 'folder', tone: 'amber', name: '文件夹', group: 'folder' };
-  const ext = extension(item), kind = ext ? fileKind(ext) : null;
-  return {
-    icon: kind?.icon || 'file-text', tone: kind?.tone || 'blue', group: kind?.group || 'document',
-    name: ext ? `${ext.toUpperCase()} 文件` : '文件',
-  };
+  if (item?._type) return item._type;
+  let result;
+  if (item.kind === 'unit') result = { icon: 'layers', tone: 'violet', name: '整体单元', group: 'folder' };
+  else if (item.kind === 'directory') result = { icon: 'folder', tone: 'amber', name: '文件夹', group: 'folder' };
+  else {
+    const ext = extension(item), kind = ext ? fileKind(ext) : null;
+    result = {
+      icon: kind?.icon || 'file-text', tone: kind?.tone || 'blue', group: kind?.group || 'document',
+      name: ext ? `${ext.toUpperCase()} 文件` : '文件',
+    };
+  }
+  if (item && typeof item === 'object') item._type = result;
+  return result;
 }
 export function normalizeSnapshot(data, vault) {
   const v = { ...vault, ...data.vault };
   return { ...data, vault: v, categories: arr(data.categories), tags: labels(data.tags), history: arr(data.history),
-    assets: arr(data.assets).map(item => ({ ...item, vaultId: v.id, rel: relative(v.root, item.path), tags: labels(item.tags), flags: labels(item.flags) })) };
+    assets: arr(data.assets).map(item => {
+      const normalized = { ...item, vaultId: v.id, rel: relative(v.root, item.path), tags: labels(item.tags), flags: labels(item.flags) };
+      assetKey(normalized);
+      assetType(normalized);
+      return normalized;
+    }) };
 }
 export function makeCategoryIndex(categories) {
   const map = new Map(categories.map(cat => [cat.id, cat]));
@@ -138,6 +154,18 @@ export function withinBoundary(item, units) {
 // Use the same management boundaries as ordinary browsing: the parent retains
 // the unit itself, but the unit's contents are shown only in its own vault.
 export function markable(item) { return item && !item.synthetic && ['filed', 'inbox'].includes(item.state); }
+export function descendantCategoryIds(id, index) {
+  const ids = new Set();
+  if (!id || !index.map.has(id)) return ids;
+  const stack = [id];
+  while (stack.length) {
+    const current = stack.pop();
+    if (ids.has(current)) continue;
+    ids.add(current);
+    for (const child of index.children.get(current) || []) stack.push(child.id);
+  }
+  return ids;
+}
 export function visibleAssets({ assets, folders, categories, page, folder, facet, filters, recent, duplicates, searchItems, sort, direction, foldersFirst }) {
   let items;
   if (page === 'search') items = searchItems;
@@ -151,15 +179,21 @@ export function visibleAssets({ assets, folders, categories, page, folder, facet
     // disk tree and in the inbox, but never silently pad this list.
     if (page === 'all') items = items.filter(a => a.state === 'filed');
     else if (page === 'inbox') items = items.filter(a => a.state === 'inbox');
-    else if (page === 'category' && facet) items = items.filter(a => ancestry(a.category_id, categories).some(c => c.id === facet));
+    else if (page === 'category' && facet) {
+      const allowed = descendantCategoryIds(facet, categories);
+      items = items.filter(a => a.category_id && allowed.has(a.category_id));
+    }
     else if (page === 'flags' || page === 'marking') items = items.filter(a => facet ? a.flags.includes(facet) : a.flags.length);
     else if (page === 'recent') items = items.filter(a => recent.has(assetKey(a)));
     else if (page === 'duplicates') items = items.filter(a => duplicates.has(a.id));
   }
   const { category, flags, type } = filters;
-  items = items.filter(a => (!category || (category === '!none' ? !a.category_id : ancestry(a.category_id, categories).some(c => c.id === category)))
-    && flags.every(flag => a.flags.includes(flag))
-    && (!type || (type === 'file' ? !isDir(a) : type === 'folder' ? isDir(a) : assetType(a).group === type && !isDir(a))));
+  const allowedCategory = category && category !== '!none' ? descendantCategoryIds(category, categories) : null;
+  if (category || flags.length || type) {
+    items = items.filter(a => (!category || (category === '!none' ? !a.category_id : (!!a.category_id && allowedCategory.has(a.category_id))))
+      && (!flags.length || flags.every(flag => a.flags.includes(flag)))
+      && (!type || (type === 'file' ? !isDir(a) : type === 'folder' ? isDir(a) : assetType(a).group === type && !isDir(a))));
+  }
   const sign = direction === 'desc' ? -1 : 1;
   return [...items].sort((a, b) => {
     if (page === 'duplicates' && duplicates.get(a.id) !== duplicates.get(b.id)) return duplicates.get(a.id) - duplicates.get(b.id);
@@ -231,12 +265,28 @@ export function treeRows({ items, folders, expanded, sort, direction, foldersFir
   walk(root, 0);
   return rows;
 }
-export function searchAssets(snapshots, query, matches) {
+export function searchAssets(snapshots, query, matches, getIndex = null) {
   const words = query.toLocaleLowerCase().trim().split(/\s+/).filter(Boolean);
   const contents = new Set(arr(matches).map(item => assetKey({ vaultId: item.vault_id, id: item.asset_id })));
   return snapshots.flatMap(snap => {
-    const cats = makeCategoryIndex(snap.categories), folders = folderIndex(snap.assets);
-    return snap.assets.filter(a => regular(a) && withinBoundary(a, folders.units) && (contents.has(assetKey(a)) || words.every(word =>
-      [a.name, a.rel, assetType(a).name, ...a.flags, ...ancestry(a.category_id, cats).map(c => c.name)].some(value => String(value).toLocaleLowerCase().includes(word)))));
+    const idx = getIndex ? getIndex(snap) : null;
+    const cats = idx?.categories || makeCategoryIndex(snap.categories);
+    const folders = idx?.folders || folderIndex(snap.assets);
+    const catNames = new Map();
+    const categoryText = id => {
+      if (!id) return '';
+      let cached = catNames.get(id);
+      if (cached === undefined) {
+        cached = ancestry(id, cats).map(c => c.name).join(' ').toLocaleLowerCase();
+        catNames.set(id, cached);
+      }
+      return cached;
+    };
+    return snap.assets.filter(a => {
+      if (!regular(a) || !withinBoundary(a, folders.units)) return false;
+      if (contents.has(assetKey(a))) return true;
+      const haystack = `${a.name}\n${a.rel}\n${assetType(a).name}\n${a.flags.join('\n')}\n${categoryText(a.category_id)}`.toLocaleLowerCase();
+      return words.every(word => haystack.includes(word));
+    });
   });
 }

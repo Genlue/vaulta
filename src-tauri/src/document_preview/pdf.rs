@@ -2,7 +2,13 @@ use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::Serialize;
 use std::{
-    sync::{Arc, Mutex},
+    collections::VecDeque,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
+    thread,
     time::SystemTime,
 };
 use vaulta_fs::RenderSource;
@@ -18,6 +24,8 @@ use windows::{
         UI::Shell::SHCreateMemStream,
     },
 };
+
+type Revision = (String, u64, SystemTime);
 
 struct Runtime;
 impl Runtime {
@@ -36,14 +44,27 @@ impl Drop for Runtime {
     }
 }
 
-struct CachedPdf {
+struct AliveGuard(Arc<AtomicBool>);
+impl Drop for AliveGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+struct PdfRequest {
     key: (String, String),
-    revision: (String, u64, SystemTime),
-    document: PdfDocument,
+    source: RenderSource,
+    index: u32,
+    reply: mpsc::SyncSender<Result<Page>>,
+}
+
+struct Worker {
+    send: mpsc::Sender<PdfRequest>,
+    alive: Arc<AtomicBool>,
 }
 
 #[derive(Clone, Default)]
-pub struct PdfCache(Arc<Mutex<Option<CachedPdf>>>);
+pub struct PdfCache(Arc<Mutex<Option<Worker>>>);
 
 #[derive(Serialize)]
 pub struct Page {
@@ -52,32 +73,119 @@ pub struct Page {
 }
 
 impl PdfCache {
-    pub fn render(&self, key: (String, String), source: RenderSource, index: u32) -> Result<Page> {
-        let _rt = Runtime::enter()?;
-        let mut cache = self
+    fn worker(&self) -> Result<mpsc::Sender<PdfRequest>> {
+        let mut slot = self
             .0
             .lock()
             .map_err(|_| anyhow::anyhow!("PDF 渲染器不可用。"))?;
-        let revision = source.revision()?;
-        if !cache
-            .as_ref()
-            .is_some_and(|c| c.key == key && c.revision == revision)
-        {
-            *cache = Some(CachedPdf {
-                key,
-                revision,
-                document: load(source.into_bytes()?)?,
-            });
-        } else {
-            drop(source);
+        if let Some(worker) = slot.as_ref() {
+            if worker.alive.load(Ordering::Acquire) {
+                return Ok(worker.send.clone());
+            }
         }
-        let document = &cache.as_ref().unwrap().document;
-        let count = document.PageCount()?;
-        ensure!(count > 0, "此 PDF 不包含页面。");
-        ensure!(index < count, "此 PDF 中不存在这一页。");
-        render_page(document, index)
-            .map(|data_url| Page { count, data_url })
-            .context("无法绘制此 PDF 页面。")
+        let (send, recv) = mpsc::channel();
+        let alive = Arc::new(AtomicBool::new(true));
+        let thread_alive = alive.clone();
+        thread::Builder::new()
+            .name("vaulta-pdf-preview".into())
+            .spawn(move || {
+                let _guard = AliveGuard(thread_alive);
+                run(recv);
+            })?;
+        *slot = Some(Worker {
+            send: send.clone(),
+            alive,
+        });
+        Ok(send)
+    }
+
+    pub fn render(&self, key: (String, String), source: RenderSource, index: u32) -> Result<Page> {
+        let send = self.worker()?;
+        let (reply, result) = mpsc::sync_channel(1);
+        send.send(PdfRequest {
+            key,
+            source,
+            index,
+            reply,
+        })
+        .map_err(|_| anyhow::anyhow!("PDF 渲染器不可用。"))?;
+        result.recv().context("PDF 渲染器未返回结果。")?
+    }
+}
+
+struct CachedPdf {
+    key: (String, String),
+    revision: Revision,
+    document: PdfDocument,
+    count: u32,
+}
+
+const MAX_CACHED_PAGES: usize = 24;
+const MAX_CACHE_BYTES: usize = 24 * 1024 * 1024;
+
+fn run(recv: mpsc::Receiver<PdfRequest>) {
+    let _rt = match Runtime::enter() {
+        Ok(rt) => rt,
+        Err(error) => {
+            eprintln!("vaulta: pdf runtime init failed: {error:#}");
+            return;
+        }
+    };
+    let mut cached_doc: Option<CachedPdf> = None;
+    let mut page_cache: VecDeque<(Revision, u32, u32, String)> = VecDeque::new();
+    let mut cache_bytes = 0usize;
+
+    while let Ok(req) = recv.recv() {
+        let result = (|| -> Result<Page> {
+            let revision = req.source.revision()?;
+            if let Some(pos) = page_cache
+                .iter()
+                .position(|(rev, idx, _, _)| *rev == revision && *idx == req.index)
+            {
+                drop(req.source);
+                let entry = page_cache.remove(pos).unwrap();
+                let page = Page {
+                    count: entry.2,
+                    data_url: entry.3.clone(),
+                };
+                page_cache.push_back(entry);
+                return Ok(page);
+            }
+            if !cached_doc
+                .as_ref()
+                .is_some_and(|c| c.key == req.key && c.revision == revision)
+            {
+                let document = load(req.source.into_bytes()?)?;
+                let count = document.PageCount()?;
+                cached_doc = Some(CachedPdf {
+                    key: req.key,
+                    revision: revision.clone(),
+                    document,
+                    count,
+                });
+            } else {
+                drop(req.source);
+            }
+            let doc = cached_doc.as_ref().unwrap();
+            ensure!(doc.count > 0, "此 PDF 不包含页面。");
+            ensure!(req.index < doc.count, "此 PDF 中不存在这一页。");
+            let data_url =
+                render_page(&doc.document, req.index).context("无法绘制此 PDF 页面。")?;
+            if data_url.len() <= MAX_CACHE_BYTES / 2 {
+                cache_bytes += data_url.len();
+                page_cache.push_back((revision, req.index, doc.count, data_url.clone()));
+                while page_cache.len() > MAX_CACHED_PAGES || cache_bytes > MAX_CACHE_BYTES {
+                    if let Some(old) = page_cache.pop_front() {
+                        cache_bytes = cache_bytes.saturating_sub(old.3.len());
+                    }
+                }
+            }
+            Ok(Page {
+                count: doc.count,
+                data_url,
+            })
+        })();
+        let _ = req.reply.send(result);
     }
 }
 
@@ -131,5 +239,9 @@ fn render_page(document: &PdfDocument, index: u32) -> Result<String> {
         png.starts_with(b"\x89PNG\r\n\x1a\n"),
         "没有生成可用的页面图像。"
     );
-    Ok(format!("data:image/png;base64,{}", STANDARD.encode(png)))
+    const PREFIX: &str = "data:image/png;base64,";
+    let mut url = String::with_capacity(PREFIX.len() + png.len().div_ceil(3) * 4);
+    url.push_str(PREFIX);
+    STANDARD.encode_string(&png, &mut url);
+    Ok(url)
 }

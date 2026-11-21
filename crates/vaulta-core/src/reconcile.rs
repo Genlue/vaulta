@@ -33,24 +33,26 @@ impl Indexed {
 }
 
 fn indexed(db: &Connection, vault: &str) -> Result<Vec<Indexed>> {
-    let mut stmt = db.prepare("SELECT id,path,identity,kind,size,created,modified,links,missing,shadowed FROM assets WHERE vault_id=?1 ORDER BY missing,id")?;
+    let mut stmt = db.prepare("SELECT id,path,identity,kind,size,created,modified,links,missing,shadowed FROM assets WHERE vault_id=?1")?;
     let rows = stmt
-        .query_map([vault], |r| {
-            Ok(Indexed {
-                id: r.get(0)?,
-                path: r.get(1)?,
-                identity: r.get(2)?,
-                kind: r.get(3)?,
-                size: r.get(4)?,
-                created: r.get(5)?,
-                modified: r.get(6)?,
-                links: r.get(7)?,
-                missing: r.get(8)?,
-                shadowed: r.get(9)?,
-            })
-        })?
+        .query_map([vault], read_indexed)?
         .collect::<rusqlite::Result<_>>()?;
     Ok(rows)
+}
+
+fn read_indexed(r: &Row<'_>) -> rusqlite::Result<Indexed> {
+    Ok(Indexed {
+        id: r.get(0)?,
+        path: r.get(1)?,
+        identity: r.get(2)?,
+        kind: r.get(3)?,
+        size: r.get(4)?,
+        created: r.get(5)?,
+        modified: r.get(6)?,
+        links: r.get(7)?,
+        missing: r.get(8)?,
+        shadowed: r.get(9)?,
+    })
 }
 
 impl Core {
@@ -101,11 +103,11 @@ impl Core {
             if let Some((walk, _)) = &observed {
                 changes = reconcile(&tx, vault_id, walk)?;
             }
-            tx.execute(
-                "UPDATE vaults SET status=?2, scan_epoch=scan_epoch+1 WHERE id=?1",
-                params![vault_id, status],
-            )?;
             if changes.changed() || current.vault.status != status {
+                tx.execute(
+                    "UPDATE vaults SET status=?2, scan_epoch=scan_epoch+1 WHERE id=?1",
+                    params![vault_id, status],
+                )?;
                 bump(&tx)?;
                 if changes.added + changes.moved + changes.missing + changes.returned > 0
                     || current.vault.status != status
@@ -160,17 +162,22 @@ impl Core {
             .optional()?;
         let child_id = match existing {
             Some(existing) => {
-                tx.execute(
-                    "UPDATE assets SET kind='unit', state='filed' WHERE id=?1",
+                if tx.execute(
+                    "UPDATE assets SET kind='unit', state='filed' WHERE id=?1 AND (kind<>'unit' OR state<>'filed')",
                     [asset_id],
-                )?;
+                )? != 0
+                {
+                    bump(&tx)?;
+                }
                 existing
             }
             None => {
+                let prefix_lo = format!("{}/", asset.path);
+                let prefix_hi = format!("{}0", asset.path);
                 let nested = tx.query_row(
                     "SELECT EXISTS(SELECT 1 FROM assets WHERE vault_id=?1 AND kind='unit'
-                         AND substr(path,1,length(?2)+1) = ?2 || '/')",
-                    params![vault_id, asset.path],
+                         AND path >= ?2 AND path < ?3)",
+                    params![vault_id, prefix_lo, prefix_hi],
                     |r| r.get::<_, bool>(0),
                 )?;
                 if nested {
@@ -180,7 +187,7 @@ impl Core {
                 tx.execute("INSERT INTO vaults(id,name,root,root_identity,parent_id,unit_id) VALUES(?1,?2,'',?3,?4,?5)", params![child_id, asset.name, guard.physical.identity, vault_id, asset_id])?;
                 metadata::seed_categories(&tx, &child_id)?;
                 tx.execute("UPDATE assets SET kind='unit', state='filed' WHERE id=?1", [asset_id])?;
-                tx.execute("UPDATE assets SET missing=1,shadowed=1 WHERE vault_id=?1 AND substr(path,1,length(?2)+1) = ?2 || '/'", params![vault_id, asset.path])?;
+                tx.execute("UPDATE assets SET missing=1,shadowed=1 WHERE vault_id=?1 AND path >= ?2 AND path < ?3", params![vault_id, prefix_lo, prefix_hi])?;
                 invalidate(&tx, vault_id)?;
                 audit(
                     &tx,
@@ -225,21 +232,25 @@ impl Core {
             return Err(invalid("a changed identity is allowed only for a single-link atomic save at the current path"));
         }
         ensure_outer_path(&tx, vault_id, &binding, new_path)?;
-        let others = indexed(&tx, vault_id)?;
-        if others
-            .iter()
-            .any(|a| a.id != asset_id && !a.missing && !a.shadowed && a.path == new_path)
-        {
+        let path_taken: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM assets WHERE vault_id=?1 AND path=?2 AND missing=0 AND shadowed=0 AND id<>?3)",
+            params![vault_id, new_path, asset_id],
+            |r| r.get(0),
+        )?;
+        if path_taken {
             return Err(invalid("destination is already tracked by another asset"));
         }
-        if !same_id
-            && others
-                .iter()
-                .any(|a| a.id != asset_id && a.identity == p.identity)
-        {
-            return Err(invalid(
-                "destination identity is already known to this vault",
-            ));
+        if !same_id {
+            let id_taken: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM assets WHERE vault_id=?1 AND identity=?2 AND id<>?3)",
+                params![vault_id, p.identity, asset_id],
+                |r| r.get(0),
+            )?;
+            if id_taken {
+                return Err(invalid(
+                    "destination identity is already known to this vault",
+                ));
+            }
         }
         if new_path != asset.path && same_id && !p.directory && p.links > 1 {
             let old = binding.root().join(filesystem::relative(&asset.path)?);
@@ -250,9 +261,13 @@ impl Core {
                 _ => return Err(invalid("cannot rebind an ambiguous hard-link move")),
             }
         }
-        let before = others
-            .iter()
-            .find(|a| a.id == asset_id)
+        let before = tx
+            .query_row(
+                "SELECT id,path,identity,kind,size,created,modified,links,missing,shadowed FROM assets WHERE vault_id=?1 AND id=?2",
+                params![vault_id, asset_id],
+                read_indexed,
+            )
+            .optional()?
             .ok_or_else(|| missing("asset", asset_id))?;
         let entry = Entry {
             path: new_path.into(),
@@ -330,41 +345,58 @@ const INSERT_ASSET_SQL: &str =
 fn reconcile(db: &Connection, vault: &str, walk: &Walk) -> Result<ScanChanges> {
     let old = indexed(db, vault)?;
     let categories = metadata::category_ids(db, vault)?;
-    let mut by_identity: HashMap<&str, Vec<usize>> = HashMap::new();
-    let mut live_by_path = HashMap::new();
+    let mut by_identity: HashMap<&str, Vec<usize>> = HashMap::with_capacity(old.len());
+    let mut live_by_path = if walk.complete {
+        HashMap::new()
+    } else {
+        HashMap::with_capacity(old.len())
+    };
     for (i, a) in old.iter().enumerate() {
         by_identity.entry(&a.identity).or_default().push(i);
-        if !a.missing {
+        if !walk.complete && !a.missing {
             live_by_path.insert(a.path.as_str(), i);
         }
     }
-    let mut seen_count = HashMap::<&str, usize>::new();
-    for entry in &walk.entries {
-        *seen_count.entry(&entry.physical.identity).or_default() += 1;
+    let mut seen_count = if walk.complete {
+        HashMap::<&str, usize>::with_capacity(walk.entries.len())
+    } else {
+        HashMap::new()
+    };
+    if walk.complete {
+        for entry in &walk.entries {
+            *seen_count.entry(&entry.physical.identity).or_default() += 1;
+        }
     }
-    let mut used = HashSet::new();
+    let mut used = vec![false; old.len()];
     let mut matches = vec![None; walk.entries.len()];
     // Exact pathname + guarded native ID wins, even for known hard-link aliases.
     for (j, entry) in walk.entries.iter().enumerate() {
-        let candidates = by_identity
-            .get(entry.physical.identity.as_str())
-            .map(Vec::as_slice)
-            .unwrap_or_default();
-        let exact = candidates
-            .iter()
-            .copied()
-            .filter(|&i| old[i].matches(&entry.physical) && old[i].path == entry.path)
-            .collect::<Vec<_>>();
-        let live_exact = exact.iter().copied().find(|&i| !old[i].missing);
+        let Some(candidates) = by_identity.get(entry.physical.identity.as_str()) else {
+            continue;
+        };
+        let mut live_exact = None;
+        let mut first_exact = None;
+        let mut exact_count = 0usize;
+        for &i in candidates {
+            if old[i].matches(&entry.physical) && old[i].path == entry.path {
+                if !old[i].missing && live_exact.is_none() {
+                    live_exact = Some(i);
+                }
+                if first_exact.is_none() {
+                    first_exact = Some(i);
+                }
+                exact_count += 1;
+            }
+        }
         if let Some(i) = live_exact.or_else(|| {
-            (walk.complete && exact.len() == 1)
-                .then(|| exact[0])
+            (walk.complete && exact_count == 1)
+                .then(|| first_exact.unwrap())
                 .filter(|&i| {
                     entry.physical.directory || (entry.physical.links == 1 && old[i].links == 1)
                 })
         }) {
             matches[j] = Some(i);
-            used.insert(i);
+            used[i] = true;
         }
     }
     if walk.complete {
@@ -380,42 +412,54 @@ fn reconcile(db: &Connection, vault: &str, walk: &Walk) -> Result<ScanChanges> {
                 continue;
             };
             let i = candidates[0];
-            if !used.contains(&i)
+            if !used[i]
                 && old[i].matches(&entry.physical)
                 && (entry.physical.directory || old[i].links == 1)
             {
                 matches[j] = Some(i);
-                used.insert(i);
+                used[i] = true;
             }
         }
     }
     let mut out = ScanChanges::default();
     if walk.complete {
         // Vacate all moving and absent slots before applying any observations (including swaps).
-        let mut moving = HashSet::new();
+        let mut moving = vec![false; old.len()];
         for (j, i) in matches
             .iter()
             .enumerate()
             .filter_map(|(j, i)| i.map(|i| (j, i)))
         {
             if old[i].path != walk.entries[j].path {
-                moving.insert(i);
+                moving[i] = true;
             }
         }
+        let mut update_missing = db.prepare_cached(UPDATE_MISSING_SQL)?;
         for (i, a) in old.iter().enumerate() {
-            if !a.missing && (moving.contains(&i) || !used.contains(&i)) {
-                db.prepare_cached(UPDATE_MISSING_SQL)?.execute([&a.id])?;
-                if !used.contains(&i) {
+            if !a.missing && (moving[i] || !used[i]) {
+                update_missing.execute([&a.id])?;
+                if !used[i] {
                     out.missing += 1;
                 }
             }
         }
     }
+    let mut update_entry = db.prepare_cached(UPDATE_ENTRY_SQL)?;
+    let mut insert_asset = db.prepare_cached(INSERT_ASSET_SQL)?;
     for (entry, index) in walk.entries.iter().zip(matches) {
         if let Some(i) = index {
             let before = &old[i];
             if !before.same(entry) {
-                apply_entry(db, &before.id, entry)?;
+                let p = &entry.physical;
+                update_entry.execute(params![
+                    &before.id,
+                    entry.path,
+                    p.size,
+                    p.modified,
+                    p.created,
+                    p.identity,
+                    p.links,
+                ])?;
                 if before.missing {
                     out.returned += 1;
                 } else if before.path != entry.path {
@@ -444,7 +488,7 @@ fn reconcile(db: &Connection, vault: &str, walk: &Walk) -> Result<ScanChanges> {
             // library directly. Files wait in the inbox until the user files
             // them, even when the classifier already named a category.
             let state = if p.directory { "filed" } else { "inbox" };
-            db.prepare_cached(INSERT_ASSET_SQL)?.execute(params![
+            insert_asset.execute(params![
                 asset_id,
                 vault,
                 entry.path,
@@ -489,9 +533,12 @@ pub(crate) fn recover(
     // A scan may have attached the classifier's suggestion before the user saw
     // the replacement. That suggestion is not user metadata: any category that
     // differs from it means the record was organized deliberately.
-    let categories = metadata::category_ids(db, vault_id)?;
-    let suggested =
-        classify::category_for(&new.path).and_then(|label| categories.get(label).cloned());
+    let suggested = if new.kind == "file" {
+        let categories = metadata::category_ids(db, vault_id)?;
+        classify::category_for(&new.path).and_then(|label| categories.get(label).cloned())
+    } else {
+        None
+    };
     let pristine_category =
         new.category_id.is_none() || new.category_id.as_deref() == suggested.as_deref();
     if old.state != "missing"

@@ -3,7 +3,7 @@ use std::{fs, path::Path};
 use rusqlite::params;
 
 use crate::{
-    audit, bump, filesystem, invalid, load_vault, path_starts, row, Core, Error, Result, Vault,
+    audit, bump, filesystem, invalid, load_vault, paths_overlap, row, Core, Error, Result, Vault,
 };
 
 impl Core {
@@ -17,13 +17,20 @@ impl Core {
         let root = dunce::canonicalize(destination)
             .map_err(|e| Error::Filesystem(destination.into(), e))?;
         // Keep both the selected path and the canonical binding pinned through commit.
-        let guard = filesystem::guarded(&root)?;
-        if selection.physical.identity != guard.physical.identity {
-            return Err(invalid("所选文件夹已变化，请重试。"));
-        }
+        let (_selection, guard) = if root == destination {
+            (None, selection)
+        } else {
+            let guard = filesystem::guarded(&root)?;
+            if selection.physical.identity != guard.physical.identity {
+                return Err(invalid("所选文件夹已变化，请重试。"));
+            }
+            (Some(selection), guard)
+        };
         let root_text = root
             .to_str()
             .ok_or_else(|| invalid("仓库路径必须可用 UTF-8 表示。"))?;
+        // Reading attributes does not guarantee permission to enumerate a directory.
+        fs::read_dir(&root).map_err(|e| Error::Filesystem(root.clone(), e))?;
 
         let tx = self.write()?;
         let current = row(&tx, vault_id)?;
@@ -51,8 +58,6 @@ impl Core {
                 "所选文件夹不是原仓库。请选择整体移动后的原文件夹；复制品或跨卷移动的目录无法安全重定位。",
             ));
         }
-        // Reading attributes does not guarantee permission to enumerate a directory.
-        fs::read_dir(&root).map_err(|e| Error::Filesystem(root.clone(), e))?;
 
         if current.vault.root != root {
             // Child vaults derive their roots from owning assets. Do not rewrite relative
@@ -83,27 +88,6 @@ impl Core {
         tx.commit()?;
         Ok(vault)
     }
-}
-
-fn paths_overlap(a: &Path, b: &Path) -> bool {
-    // Keep long paths comparable to short ancestors even when dunce must retain the
-    // verbatim syntax for the longer path. Both bindings are already canonical.
-    fn comparison_path(path: &Path) -> std::borrow::Cow<'_, Path> {
-        let text = path.to_str().expect("canonical vault paths are UTF-8");
-        match text.strip_prefix(r"\\?\") {
-            Some(path)
-                if path
-                    .get(..4)
-                    .is_some_and(|p| p.eq_ignore_ascii_case(r"UNC\")) =>
-            {
-                std::borrow::Cow::Owned(format!(r"\\{}", &path[4..]).into())
-            }
-            Some(path) => std::borrow::Cow::Borrowed(Path::new(path)),
-            None => std::borrow::Cow::Borrowed(Path::new(text)),
-        }
-    }
-    let (a, b) = (comparison_path(a), comparison_path(b));
-    path_starts(&a, &b) || path_starts(&b, &a)
 }
 
 #[cfg(all(test, windows))]

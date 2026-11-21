@@ -110,14 +110,38 @@ mod view;
 #[cfg(windows)]
 pub use {
     content::{
-        duplicate_groups, open_render_source, preview, save_text, save_text_verified,
-        save_text_verified_checked, text_matches, RenderSource,
+        duplicate_groups, is_searchable_rel, open_render_source, preview, save_text,
+        save_text_verified, save_text_verified_checked, text_matches, RenderSource,
     },
     path::{mkdir, move_asset, move_asset_checked, rename, rename_checked, resolve},
     shell::{open, open_checked, recycle, recycle_checked},
     view::{sync_view, sync_view_checked},
 };
 
+#[cfg(not(windows))]
+pub struct RenderSource;
+#[cfg(not(windows))]
+impl RenderSource {
+    pub fn extension(&self) -> String {
+        String::new()
+    }
+    pub fn into_bytes(self) -> Result<Vec<u8>> {
+        Err(Error::Unsupported("Vaulta's filesystem backend requires Windows"))
+    }
+    pub fn revision(&self) -> Result<(String, u64, std::time::SystemTime)> {
+        Err(Error::Unsupported("Vaulta's filesystem backend requires Windows"))
+    }
+    pub fn has_zone_marker(&self) -> io::Result<bool> {
+        Ok(false)
+    }
+    pub fn open_zone_marker(&self) -> io::Result<Option<std::fs::File>> {
+        Ok(None)
+    }
+}
+#[cfg(not(windows))]
+pub fn is_searchable_rel(_rel: &str) -> bool {
+    false
+}
 #[cfg(not(windows))]
 macro_rules! unsupported {
     ($($name:ident($($arg:ident: $ty:ty),*) -> $ret:ty;)*) => {$(
@@ -130,10 +154,11 @@ macro_rules! unsupported {
 #[cfg(not(windows))]
 unsupported! {
     preview(root: &Path, rel: &str) -> Preview;
+    open_render_source(root: &Path, rel: &str, expected_identity: &str, kind: PreviewKind) -> RenderSource;
     save_text(root: &Path, rel: &str, revision: &str, text: &str) -> ();
     save_text_verified(root: &Path, rel: &str, revision: &str, text: &str) -> TextSave;
     duplicate_groups(root: &Path, paths: &[String]) -> Vec<Vec<String>>;
-    text_matches(root: &Path, rel: &str, query: &str) -> Option<bool>;
+    text_matches(root: &Path, rel: &str, query: &str) -> bool;
     resolve(root: &Path, rel: &str) -> PathBuf;
     rename(root: &Path, rel: &str, name: &str) -> String;
     mkdir(root: &Path, parent: &str, name: &str) -> String;

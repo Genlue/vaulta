@@ -62,8 +62,11 @@ struct Disk {
     dirs: HashMap<PathBuf, Dir>,
 }
 
-fn inspect_link(file: &File, path: &Path) -> Result<Option<Link>> {
-    let attrs = tag(file, path)?;
+fn inspect_link_with_tag(
+    file: &File,
+    path: &Path,
+    attrs: &FILE_ATTRIBUTE_TAG_INFO,
+) -> Result<Option<Link>> {
     if attrs.ReparseTag != SYMLINK_TAG {
         return Ok(None);
     }
@@ -75,6 +78,10 @@ fn inspect_link(file: &File, path: &Path) -> Result<Option<Link>> {
         raw_target,
         directory: attrs.FileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0,
     }))
+}
+fn inspect_link(file: &File, path: &Path) -> Result<Option<Link>> {
+    let attrs = tag(file, path)?;
+    inspect_link_with_tag(file, path, &attrs)
 }
 fn dispose(file: &File, path: &Path) -> Result<()> {
     let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
@@ -126,7 +133,7 @@ fn init_manifest(view: &Dir, value: &Manifest) -> Result<()> {
         CREATE_NEW,
     )?;
     let result = (|| {
-        serde_json::to_writer_pretty(&mut file, value)
+        serde_json::to_writer(&mut file, value)
             .map_err(|e| io_error("write new projection manifest", &path, e.into()))?;
         file.sync_all()
             .map_err(|e| io_error("flush new projection manifest", &path, e))?;
@@ -162,7 +169,7 @@ fn read_manifest(file: &mut File, path: &Path) -> Result<Manifest> {
     })
 }
 fn write_manifest(writer: &mut Writer, path: &Path, manifest: &Manifest, key: &str) -> Result<()> {
-    let data = serde_json::to_vec_pretty(manifest)
+    let data = serde_json::to_vec(manifest)
         .map_err(|e| io_error("encode projection manifest", path, e.into()))?;
     if data.len() > MAX_MANIFEST || verify_manifest(&writer.file, path)? != key {
         return Err(Error::Conflict);
@@ -192,6 +199,9 @@ fn scan(dir: Dir, depth: usize, disk: &mut Disk) -> Result<()> {
         if depth == 0 && entry.file_name() == MANIFEST {
             continue;
         }
+        if entry.file_type().is_ok_and(|t| t.is_file()) {
+            continue;
+        }
         let file = file_open(
             &path,
             FILE_READ_ATTRIBUTES.0,
@@ -200,7 +210,7 @@ fn scan(dir: Dir, depth: usize, disk: &mut Disk) -> Result<()> {
         )?;
         let attrs = tag(&file, &path)?;
         if attrs.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
-            if let Some(link) = inspect_link(&file, &path)? {
+            if let Some(link) = inspect_link_with_tag(&file, &path, &attrs)? {
                 disk.links.push(link);
             }
         } else if attrs.FileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0 {
@@ -269,14 +279,14 @@ fn category_dirs(
     result
 }
 fn targets(
-    root: &Path,
+    root: &Dir,
     items: &[ViewItem],
     expected_identities: &HashMap<String, String>,
     warnings: &mut Vec<String>,
 ) -> BTreeMap<String, Target> {
     let mut targets = BTreeMap::new();
     for item in items {
-        match Asset::open(root, &item.path, 0, FILE_SHARE_READ) {
+        match Asset::open_under(root, &item.path, 0, FILE_SHARE_READ) {
             Ok(file) if file.is_dir == item.is_dir => match identity_key(&file.file, &file.path) {
                 Ok(key)
                     if expected_identities
@@ -355,7 +365,7 @@ fn link_destination(link: &Link, root: &Dir) -> Option<(PathBuf, String)> {
         };
         relative.push(part.to_str()?);
     }
-    let file = Asset::open(&root.path, &relative.join("/"), 0, FILE_SHARE_READ).ok()?;
+    let file = Asset::open_under(root, &relative.join("/"), 0, FILE_SHARE_READ).ok()?;
     let key = identity_key(&file.file, &file.path).ok()?;
     (link.directory == file.is_dir).then_some((file.path, key))
 }
@@ -412,11 +422,13 @@ fn establish_link(dir: &Dir, target: &Target, id: &str) -> Result<Link> {
         return Err(Error::Conflict);
     }
     let leaf = target.path.file_name().unwrap();
-    let hash = format!("{:x}", Sha256::digest(id.as_bytes()));
-    for (n, name) in [leaf.to_os_string(), format!("asset-{}", &hash[..24]).into()]
-        .into_iter()
-        .enumerate()
-    {
+    for n in 0..2 {
+        let name: std::ffi::OsString = if n == 0 {
+            leaf.to_os_string()
+        } else {
+            let hash = format!("{:x}", Sha256::digest(id.as_bytes()));
+            format!("asset-{}", &hash[..24]).into()
+        };
         if name == OsStr::new(MANIFEST) {
             continue;
         }
@@ -599,7 +611,7 @@ fn sync(
         indexes.entry(&link.key).or_default().push(i);
     }
     let targets = if enabled {
-        targets(&root.path, items, expected_identities, &mut report.warnings)
+        targets(root, items, expected_identities, &mut report.warnings)
     } else {
         BTreeMap::new()
     };
@@ -626,10 +638,20 @@ fn sync(
             }
         }
     }
+    let prior_cats: HashMap<&str, &[String]> = manifest
+        .categories
+        .iter()
+        .map(|c| (c.id.as_str(), c.path.as_slice()))
+        .collect();
+    let current_cats: HashMap<&str, &[String]> = categories
+        .iter()
+        .map(|c| (c.id.as_str(), c.path.as_slice()))
+        .collect();
     let same_layout = |category: &str| {
-        let prior = manifest.categories.iter().find(|c| c.id == category);
-        let current = categories.iter().find(|c| c.id == category);
-        matches!((prior, current), (Some(a), Some(b)) if a.path == b.path)
+        matches!(
+            (prior_cats.get(category), current_cats.get(category)),
+            (Some(a), Some(b)) if a == b
+        )
     };
     let mut blocked = BTreeSet::new();
     if enabled && import {
@@ -683,7 +705,18 @@ fn sync(
         }
     }
     let desired = if enabled {
-        category_dirs(categories, &disk, base, &mut report.warnings, true)
+        if dirs.len() == categories.len() {
+            dirs
+        } else {
+            let mut create_warnings = Vec::new();
+            let resolved = category_dirs(categories, &disk, base, &mut create_warnings, true);
+            for w in create_warnings {
+                if !report.warnings.contains(&w) {
+                    report.warnings.push(w);
+                }
+            }
+            resolved
+        }
     } else {
         HashMap::new()
     };
@@ -708,7 +741,7 @@ fn sync(
             .and_then(|id| desired.get(id));
         if target
             .and_then(|t| t.category.as_ref())
-            .is_some_and(|id| categories.iter().any(|c| c.id == *id))
+            .is_some_and(|id| current_cats.contains_key(id.as_str()))
             && dest.is_none()
         {
             continue;
@@ -757,25 +790,29 @@ fn sync(
         }
         // Hold a non-delete-shared target during link creation or retargeting; never bind a
         // replacement that appeared after reading the metadata snapshot.
-        let _target_guard = if let (Some(target), Some(_)) = (target, dest) {
-            match Asset::open(
-                &root.path,
-                &target.relative,
-                FILE_READ_DATA.0,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-            )
-            .and_then(|file| {
-                if file.path != target.path || file.is_dir != target.directory {
-                    return Err(Error::Conflict);
+        let _target_guard = if keep.is_none() {
+            if let (Some(target), Some(_)) = (target, dest) {
+                match Asset::open_under(
+                    root,
+                    &target.relative,
+                    FILE_READ_DATA.0,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                )
+                .and_then(|file| {
+                    if file.path != target.path || file.is_dir != target.directory {
+                        return Err(Error::Conflict);
+                    }
+                    verify(&file.file, &file.path, Some(&target.key))?;
+                    Ok(file)
+                }) {
+                    Ok(file) => Some(file),
+                    Err(e) => {
+                        report.warnings.push(format!("Asset {id}: {e}"));
+                        continue;
+                    }
                 }
-                verify(&file.file, &file.path, Some(&target.key))?;
-                Ok(file)
-            }) {
-                Ok(file) => Some(file),
-                Err(e) => {
-                    report.warnings.push(format!("Asset {id}: {e}"));
-                    continue;
-                }
+            } else {
+                None
             }
         } else {
             None

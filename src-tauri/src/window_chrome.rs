@@ -131,7 +131,7 @@ pub fn window_chrome_state(window: WebviewWindow) -> Reply<ChromeState> {
 }
 
 #[tauri::command]
-pub fn set_window_chrome_mode(
+pub async fn set_window_chrome_mode(
     window: WebviewWindow,
     chrome: State<'_, WindowChrome>,
     selected: ChromeMode,
@@ -142,7 +142,12 @@ pub fn set_window_chrome_mode(
         window
             .set_decorations(selected == ChromeMode::Native)
             .map_err(|e| e.to_string())?;
-        if let Err(error) = write_mode(&chrome.0, selected) {
+        let path = chrome.0.clone();
+        let saved = tauri::async_runtime::spawn_blocking(move || write_mode(&path, selected))
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))
+            .and_then(|r| r);
+        if let Err(error) = saved {
             if let Err(rollback) = window.set_decorations(previous == ChromeMode::Native) {
                 return Err(format!(
                     "无法保存标题栏设置：{error:#}。恢复窗口装饰失败：{rollback}"

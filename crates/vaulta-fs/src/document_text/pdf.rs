@@ -28,6 +28,8 @@ pub(super) fn extract(input: &[u8], out: &mut Text) -> Option<()> {
     let mut encoded_remaining = super::MAX_INPUT;
     let mut operations = MAX_OPS;
     let mut seen = HashSet::new();
+    let mut data = Vec::new();
+    let mut font_cache = std::collections::HashMap::<lopdf::ObjectId, Option<Encoding<'_>>>::new();
     for (n, id) in doc.page_iter().enumerate() {
         if n == MAX_PAGES || !seen.insert(id) {
             return None;
@@ -37,7 +39,7 @@ pub(super) fn extract(input: &[u8], out: &mut Text) -> Option<()> {
             continue;
         }
         let contents = page.get_deref(b"Contents", &doc).ok()?;
-        let mut data = Vec::new();
+        data.clear();
         let mut append = |obj: &Object| -> Option<()> {
             let stream = doc.dereference(obj).ok()?.1.as_stream().ok()?;
             // Charge reused streams each time, including their encoded bytes, so references
@@ -60,8 +62,13 @@ pub(super) fn extract(input: &[u8], out: &mut Text) -> Option<()> {
             s => append(s)?,
         }
         let fonts = page_fonts(page, &doc)?;
-        let mut encodings = BTreeMap::new();
-        let mut current = None;
+        enum FontSlot<'a> {
+            Cached(lopdf::ObjectId),
+            Inline(&'a [u8]),
+        }
+        let mut page_slots: BTreeMap<&[u8], Option<FontSlot<'_>>> = BTreeMap::new();
+        let mut inline_encodings: BTreeMap<&[u8], Option<Encoding<'_>>> = BTreeMap::new();
+        let mut current: Option<FontSlot<'_>> = None;
         let mut in_text = false;
         for op in Content::decode_iter(&data) {
             operations = operations.checked_sub(1)?;
@@ -78,31 +85,61 @@ pub(super) fn extract(input: &[u8], out: &mut Text) -> Option<()> {
                 "Tf" if in_text => {
                     let name = op.operands.first()?.as_name().ok()?;
                     current = None;
-                    if let Some(encoding) = encodings.get_key_value(name) {
-                        current = Some(*encoding.0);
+                    if let Some(slot) = page_slots.get(name) {
+                        current = match slot {
+                            Some(FontSlot::Cached(id)) => Some(FontSlot::Cached(*id)),
+                            Some(FontSlot::Inline(k)) => Some(FontSlot::Inline(*k)),
+                            None => None,
+                        };
                     } else if let Some((key, font)) =
                         fonts.and_then(|fonts| fonts.iter().find(|(key, _)| key.as_slice() == name))
                     {
-                        if encodings.len() == MAX_PAGE_FONTS {
+                        if page_slots.len() == MAX_PAGE_FONTS {
                             return None;
                         }
-                        let encoding = doc
-                            .dereference(font)
-                            .ok()?
-                            .1
-                            .as_dict()
-                            .ok()
-                            .and_then(|font| basic_encoding(font, &doc));
-                        encodings.insert(key.as_slice(), encoding);
-                        current = Some(key.as_slice());
+                        let slot = match font {
+                            Object::Reference(font_id) => {
+                                if !font_cache.contains_key(font_id) {
+                                    let enc = doc
+                                        .dereference(font)
+                                        .ok()?
+                                        .1
+                                        .as_dict()
+                                        .ok()
+                                        .and_then(|d| basic_encoding(d, &doc));
+                                    font_cache.insert(*font_id, enc);
+                                }
+                                Some(FontSlot::Cached(*font_id))
+                            }
+                            _ => {
+                                let enc = doc
+                                    .dereference(font)
+                                    .ok()?
+                                    .1
+                                    .as_dict()
+                                    .ok()
+                                    .and_then(|d| basic_encoding(d, &doc));
+                                inline_encodings.insert(key.as_slice(), enc);
+                                Some(FontSlot::Inline(key.as_slice()))
+                            }
+                        };
+                        current = match &slot {
+                            Some(FontSlot::Cached(id)) => Some(FontSlot::Cached(*id)),
+                            Some(FontSlot::Inline(k)) => Some(FontSlot::Inline(*k)),
+                            None => None,
+                        };
+                        page_slots.insert(key.as_slice(), slot);
                     }
                 }
                 "T*" | "Td" | "TD" if in_text => out.line()?,
                 "Tj" | "TJ" | "'" | "\"" if in_text => {
-                    let Some(encoding) = current
-                        .and_then(|name| encodings.get(name))
-                        .and_then(Option::as_ref)
-                    else {
+                    let Some(encoding) = (match &current {
+                        Some(FontSlot::Cached(id)) => font_cache.get(id).and_then(Option::as_ref),
+                        Some(FontSlot::Inline(k)) => {
+                            inline_encodings.get(k).and_then(Option::as_ref)
+                        }
+                        None => None,
+                    }) else {
                         continue;
                     };
                     if matches!(op.operator.as_str(), "'" | "\"") {

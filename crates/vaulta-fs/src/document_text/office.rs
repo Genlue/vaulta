@@ -122,7 +122,7 @@ fn read_part(
     }
     let local = archive.get_entry(entry.wayfinder()).ok()?;
     let data = local.data();
-    let mut xml = Vec::new();
+    let mut xml = Vec::with_capacity(declared);
     // Read at most cap + 1 even if the advertised size is forged. rawzip also checks CRC.
     match entry.compression_method() {
         CompressionMethod::STORE => local
@@ -215,7 +215,7 @@ fn parse_xml(xml: &[u8], part: Part, shared: &mut Shared, out: &mut Text) -> Opt
     reader.config_mut().expand_empty_elements = true;
     let mut stack = Vec::new();
     let mut root_seen = false;
-    let mut cell_type = None;
+    let mut is_shared_cell = false;
     let mut index = String::new();
     loop {
         let (ns, event) = reader.read_resolved_event().ok()?;
@@ -255,10 +255,10 @@ fn parse_xml(xml: &[u8], part: Part, shared: &mut Shared, out: &mut Text) -> Opt
                             if stack.contains(&Tag::Cell) {
                                 return None;
                             }
-                            cell_type = element
-                                .try_get_attribute("t")
-                                .ok()?
-                                .map(|a| a.value.into_owned());
+                            is_shared_cell = matches!(
+                                element.try_get_attribute("t").ok()?,
+                                Some(a) if a.value.as_ref() == "s"
+                            );
                             index.clear();
                             Tag::Cell
                         }
@@ -298,7 +298,7 @@ fn parse_xml(xml: &[u8], part: Part, shared: &mut Shared, out: &mut Text) -> Opt
                     }
                     shared.ends.push(shared.data.0.len());
                 }
-                Tag::Value if cell_type.as_deref() == Some("s") => {
+                Tag::Value if is_shared_cell => {
                     out.push(shared.get(index.trim().parse().ok()?)?)?;
                 }
                 _ => {}
@@ -320,7 +320,7 @@ fn parse_xml(xml: &[u8], part: Part, shared: &mut Shared, out: &mut Text) -> Opt
                 match stack.last() {
                     Some(Tag::Text) if matches!(part, Part::Shared) => shared.data.push(&text)?,
                     Some(Tag::Text) => out.push(&text)?,
-                    Some(Tag::Value) if cell_type.as_deref() == Some("s") => {
+                    Some(Tag::Value) if is_shared_cell => {
                         if text.len() > 32 - index.len() {
                             return None;
                         }

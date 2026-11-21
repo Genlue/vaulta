@@ -54,6 +54,10 @@ CREATE TABLE assets (
 );
 CREATE UNIQUE INDEX asset_live_path ON assets(vault_id, path) WHERE missing = 0;
 CREATE INDEX asset_by_identity ON assets(vault_id, identity);
+CREATE INDEX IF NOT EXISTS asset_visible_order ON assets(vault_id, path, missing, id) WHERE shadowed = 0;
+CREATE INDEX IF NOT EXISTS asset_by_category ON assets(vault_id, category_id);
+CREATE INDEX IF NOT EXISTS asset_units ON assets(vault_id, path, identity) WHERE kind = 'unit';
+CREATE INDEX IF NOT EXISTS asset_by_path ON assets(vault_id, path);
 
 CREATE TABLE history (
     seq INTEGER PRIMARY KEY,
@@ -65,5 +69,6 @@ CREATE TABLE history (
     undone INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX history_by_vault ON history(vault_id, seq DESC);
+CREATE INDEX IF NOT EXISTS history_undoable ON history(vault_id, seq DESC) WHERE undone = 0 AND undo IS NOT NULL;
 
 

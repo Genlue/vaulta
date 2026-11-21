@@ -10,6 +10,7 @@ let root;
 let installation;
 let changing = false;
 let refreshQueued = false;
+let resizeTimer = 0;
 let generation = 0;
 
 export const getWindowChromeMode = () => state.mode;
@@ -75,6 +76,12 @@ function refresh() {
   });
 }
 
+function refreshOnResize() {
+  if (state.mode !== LIGHTS || changing) return;
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(refresh, 80);
+}
+
 function reportError(error) {
   console.error('vaulta window chrome:', error);
   if (!root?.querySelector('.window-chrome__feedback')) {
@@ -103,14 +110,15 @@ export function installWindowChrome() {
     // Attach before the first read so a focus change during startup is not lost.
     // DOM resize handles live resizing; native focus/resize also notify when
     // WebView rendering is suspended or asynchronously resized at the OS level.
-    window.addEventListener('resize', refresh);
+    window.addEventListener('resize', refreshOnResize);
     window.addEventListener('focus', refresh);
     window.addEventListener('blur', refresh);
     document.addEventListener('visibilitychange', refresh);
     const events = globalThis.__TAURI__?.event;
     const owner = { kind: 'WebviewWindow', label: 'main' };
     if (events?.listen) {
-      for (const event of ['tauri://resize', 'tauri://focus', 'tauri://blur']) {
+      void events.listen('tauri://resize', refreshOnResize, { target: owner }).catch(reportError);
+      for (const event of ['tauri://focus', 'tauri://blur']) {
         void events.listen(event, refresh, { target: owner }).catch(reportError);
       }
     }

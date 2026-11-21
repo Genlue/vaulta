@@ -31,6 +31,16 @@ export function officePreview(inspector, { blocked, failed }) {
     if (!running || frame) return;
     frame = requestAnimationFrame(() => { frame = 0; void send().catch(() => {}); });
   }
+  function attachListeners() {
+    window.addEventListener('resize', schedule);
+    window.addEventListener('scroll', schedule, { capture: true, passive: true });
+    document.addEventListener('visibilitychange', schedule);
+  }
+  function detachListeners() {
+    window.removeEventListener('resize', schedule);
+    window.removeEventListener('scroll', schedule, { capture: true, passive: true });
+    document.removeEventListener('visibilitychange', schedule);
+  }
   function update(asset, confirmedSession = null) {
     const next = asset && inspector.querySelector('.office-preview-surface');
     if (target === next) { schedule(); return; }
@@ -40,6 +50,7 @@ export function officePreview(inspector, { blocked, failed }) {
       session = null;
       if (running) {
         running = false;
+        detachListeners();
         observer.disconnect(); mutations.disconnect();
         if (frame) cancelAnimationFrame(frame);
         frame = 0;
@@ -47,7 +58,10 @@ export function officePreview(inspector, { blocked, failed }) {
       }
       return;
     }
-    running = true;
+    if (!running) {
+      running = true;
+      attachListeners();
+    }
     session = ++sequence;
     const request = session;
     const node = target;
@@ -64,9 +78,6 @@ export function officePreview(inspector, { blocked, failed }) {
       if (request === session) failed(error);
     });
   }
-  window.addEventListener('resize', schedule);
-  window.addEventListener('scroll', schedule, true);
-  document.addEventListener('visibilitychange', schedule);
   window.addEventListener('pagehide', () => update(null));
   return { update };
 }

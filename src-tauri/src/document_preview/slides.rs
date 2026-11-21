@@ -6,12 +6,16 @@ use flate2::bufread::DeflateDecoder;
 use quick_xml::{Reader, XmlVersion, events::Event};
 use rawzip::{CompressionMethod, ZipArchive};
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::{
     fs::File,
     io::{Read, Write},
     path::Path,
-    sync::{Arc, Mutex, mpsc},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread,
     time::{Duration, SystemTime},
 };
@@ -44,8 +48,20 @@ struct Request {
     reply: mpsc::SyncSender<Result<PageResult>>,
 }
 
+struct AliveGuard(Arc<AtomicBool>);
+impl Drop for AliveGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+struct Worker {
+    send: mpsc::SyncSender<Request>,
+    alive: Arc<AtomicBool>,
+}
+
 #[derive(Clone, Default)]
-pub struct SlidesHost(Arc<Mutex<Option<mpsc::SyncSender<Request>>>>);
+pub struct SlidesHost(Arc<Mutex<Option<Worker>>>);
 
 impl SlidesHost {
     pub fn page(
@@ -60,14 +76,39 @@ impl SlidesHost {
                 .0
                 .lock()
                 .map_err(|_| anyhow::anyhow!("幻灯片渲染器不可用。"))?;
-            if let Some(send) = worker.as_ref() {
-                send.clone()
+            if let Some(w) = worker.as_ref() {
+                if w.alive.load(Ordering::Acquire) {
+                    w.send.clone()
+                } else {
+                    let (send, recv) = mpsc::sync_channel(1);
+                    let alive = Arc::new(AtomicBool::new(true));
+                    let thread_alive = alive.clone();
+                    thread::Builder::new()
+                        .name("vaulta-slides-preview".into())
+                        .spawn(move || {
+                            let _guard = AliveGuard(thread_alive);
+                            run(recv);
+                        })?;
+                    *worker = Some(Worker {
+                        send: send.clone(),
+                        alive,
+                    });
+                    send
+                }
             } else {
                 let (send, recv) = mpsc::sync_channel(1);
+                let alive = Arc::new(AtomicBool::new(true));
+                let thread_alive = alive.clone();
                 thread::Builder::new()
                     .name("vaulta-slides-preview".into())
-                    .spawn(move || run(recv))?;
-                *worker = Some(send.clone());
+                    .spawn(move || {
+                        let _guard = AliveGuard(thread_alive);
+                        run(recv);
+                    })?;
+                *worker = Some(Worker {
+                    send: send.clone(),
+                    alive,
+                });
                 send
             }
         };
@@ -88,20 +129,61 @@ impl SlidesHost {
 
 type Revision = (String, u64, SystemTime);
 
+struct ActiveDeck {
+    revision: Revision,
+    temp: tempfile::TempDir,
+    _app: IDispatch,
+    presentation: Presentation,
+    slides: IDispatch,
+    count: u32,
+    width: i32,
+    height: i32,
+}
+
+const MAX_CACHED_SLIDES: usize = 16;
+const MAX_CACHE_BYTES: usize = 24 * 1024 * 1024;
+const IDLE_CLOSE: Duration = Duration::from_secs(45);
+
 fn run(recv: mpsc::Receiver<Request>) {
+    let _apartment = match Apartment::enter() {
+        Ok(apt) => apt,
+        Err(error) => {
+            eprintln!("vaulta: slides STA init failed: {error:#}");
+            return;
+        }
+    };
     let mut prompt: Option<(u64, Revision)> = None;
     let mut allowed: Option<(u64, Revision)> = None;
-    while let Ok(req) = recv.recv() {
+    let mut active: Option<ActiveDeck> = None;
+    let mut slide_cache: VecDeque<(Revision, u32, u32, String)> = VecDeque::new();
+    let mut cache_bytes = 0usize;
+
+    loop {
+        let req = if active.is_some() {
+            match recv.recv_timeout(IDLE_CLOSE) {
+                Ok(req) => req,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    active = None;
+                    continue;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        } else {
+            match recv.recv() {
+                Ok(req) => req,
+                Err(_) => break,
+            }
+        };
         let previous_prompt = prompt.take();
         let previous_allowed = allowed.take();
         let mut next_allowed = None;
-        let result = (|| {
+        let result = (|| -> Result<PageResult> {
+            let revision = req.source.revision()?;
             let marker = req
                 .source
                 .open_zone_marker()
                 .context("无法核对文件的下载来源。")?;
             if marker.is_some() {
-                let revision = req.source.revision()?;
                 let confirmed = previous_prompt.is_some_and(|(session, old)| {
                     Some(session) == req.confirmed_session && old == revision
                 }) || previous_allowed
@@ -110,9 +192,68 @@ fn run(recv: mpsc::Receiver<Request>) {
                     prompt = Some((req.session, revision));
                     return Ok(PageResult::DownloadMarked);
                 }
-                next_allowed = Some((req.session, revision));
+                next_allowed = Some((req.session, revision.clone()));
             }
-            render(req.source, marker, req.index)
+            if let Some(pos) = slide_cache
+                .iter()
+                .position(|(rev, idx, _, _)| *rev == revision && *idx == req.index)
+            {
+                drop(req.source);
+                let entry = slide_cache.remove(pos).unwrap();
+                let res = PageResult::Rendered {
+                    count: entry.2,
+                    data_url: entry.3.clone(),
+                };
+                slide_cache.push_back(entry);
+                return Ok(res);
+            }
+            let reuse = active.as_ref().is_some_and(|d| d.revision == revision);
+            if reuse {
+                drop(req.source);
+                match export_slide(active.as_ref().unwrap(), req.index) {
+                    Ok(rendered) => {
+                        if let PageResult::Rendered { count, ref data_url } = rendered {
+                            if data_url.len() <= MAX_CACHE_BYTES / 2 {
+                                cache_bytes += data_url.len();
+                                slide_cache.push_back((
+                                    revision,
+                                    req.index,
+                                    count,
+                                    data_url.clone(),
+                                ));
+                                while slide_cache.len() > MAX_CACHED_SLIDES
+                                    || cache_bytes > MAX_CACHE_BYTES
+                                {
+                                    if let Some(old) = slide_cache.pop_front() {
+                                        cache_bytes = cache_bytes.saturating_sub(old.3.len());
+                                    }
+                                }
+                            }
+                        }
+                        return Ok(rendered);
+                    }
+                    Err(err) => {
+                        active = None;
+                        return Err(err);
+                    }
+                }
+            }
+            active = None;
+            let deck = open_deck(req.source, marker, revision.clone())?;
+            let rendered = export_slide(&deck, req.index)?;
+            active = Some(deck);
+            if let PageResult::Rendered { count, ref data_url } = rendered {
+                if data_url.len() <= MAX_CACHE_BYTES / 2 {
+                    cache_bytes += data_url.len();
+                    slide_cache.push_back((revision, req.index, count, data_url.clone()));
+                    while slide_cache.len() > MAX_CACHED_SLIDES || cache_bytes > MAX_CACHE_BYTES {
+                        if let Some(old) = slide_cache.pop_front() {
+                            cache_bytes = cache_bytes.saturating_sub(old.3.len());
+                        }
+                    }
+                }
+            }
+            Ok(rendered)
         })();
         let rendered = matches!(result, Ok(PageResult::Rendered { .. }));
         if req.reply.send(result).is_ok() && rendered {
@@ -134,7 +275,7 @@ impl Drop for Apartment {
     }
 }
 
-fn render(source: RenderSource, marker: Option<File>, index: u32) -> Result<PageResult> {
+fn open_deck(source: RenderSource, marker: Option<File>, revision: Revision) -> Result<ActiveDeck> {
     let ext = source.extension();
     let mut zone = Vec::new();
     let marked = marker.is_some();
@@ -162,7 +303,6 @@ fn render(source: RenderSource, marker: Option<File>, index: u32) -> Result<Page
             .and_then(|mut file| file.write_all(&zone))
             .context("无法为临时副本保留 Windows 下载标记。")?;
     }
-    let _apartment = Apartment::enter()?;
     let clsid = unsafe { CLSIDFromProgID(w!("PowerPoint.Application")) }
         .context("未找到桌面版 Microsoft PowerPoint，无法渲染幻灯片。")?;
     let app: IDispatch = unsafe { CoCreateInstance(&clsid, None, CLSCTX_LOCAL_SERVER) }
@@ -189,16 +329,6 @@ fn render(source: RenderSource, marker: Option<File>, index: u32) -> Result<Page
     };
     let slides = object(&document.0, "Slides", DISPATCH_PROPERTYGET, &mut [])?;
     let count = u32::try_from(&property(&slides, "Count")?)?;
-    ensure!(
-        index < count && index < i32::MAX as u32,
-        "此演示文稿中没有这张幻灯片。"
-    );
-    let slide = object(
-        &slides,
-        "Item",
-        DISPATCH_METHOD | DISPATCH_PROPERTYGET,
-        &mut [(index as i32 + 1).into()],
-    )?;
     let setup = object(&document.0, "PageSetup", DISPATCH_PROPERTYGET, &mut [])?;
     let width = f64::try_from(&property(&setup, "SlideWidth")?)?;
     let height = f64::try_from(&property(&setup, "SlideHeight")?)?;
@@ -207,14 +337,38 @@ fn render(source: RenderSource, marker: Option<File>, index: u32) -> Result<Page
         "无效的幻灯片尺寸。"
     );
     let scale = 1600. / width.max(height);
-    let output = temp.path().join("slide.png");
+    Ok(ActiveDeck {
+        revision,
+        temp,
+        _app: app,
+        presentation: document,
+        slides,
+        count,
+        width: (width * scale).round().max(1.) as i32,
+        height: (height * scale).round().max(1.) as i32,
+    })
+}
+
+fn export_slide(deck: &ActiveDeck, index: u32) -> Result<PageResult> {
+    let _ = &deck.presentation;
+    ensure!(
+        index < deck.count && index < i32::MAX as u32,
+        "此演示文稿中没有这张幻灯片。"
+    );
+    let slide = object(
+        &deck.slides,
+        "Item",
+        DISPATCH_METHOD | DISPATCH_PROPERTYGET,
+        &mut [(index as i32 + 1).into()],
+    )?;
+    let output = deck.temp.path().join(format!("slide-{index}.png"));
     invoke(
         &slide,
         "Export",
         DISPATCH_METHOD,
         &mut [
-            ((height * scale).round().max(1.) as i32).into(),
-            ((width * scale).round().max(1.) as i32).into(),
+            deck.height.into(),
+            deck.width.into(),
             "PNG".into(),
             file_arg(&output),
         ],
@@ -222,16 +376,20 @@ fn render(source: RenderSource, marker: Option<File>, index: u32) -> Result<Page
     .context("PowerPoint 无法绘制此幻灯片。")?;
     const MAX_PNG: u64 = 14 * 1024 * 1024;
     let mut png = Vec::new();
-    File::open(output)?
-        .take(MAX_PNG + 1)
-        .read_to_end(&mut png)?;
+    let read_res = File::open(&output).and_then(|f| f.take(MAX_PNG + 1).read_to_end(&mut png));
+    let _ = std::fs::remove_file(&output);
+    read_res?;
     ensure!(
         png.len() as u64 <= MAX_PNG && png.starts_with(b"\x89PNG\r\n\x1a\n"),
         "未生成可用的幻灯片图像。"
     );
+    const PREFIX: &str = "data:image/png;base64,";
+    let mut url = String::with_capacity(PREFIX.len() + png.len().div_ceil(3) * 4);
+    url.push_str(PREFIX);
+    STANDARD.encode_string(&png, &mut url);
     Ok(PageResult::Rendered {
-        count,
-        data_url: format!("data:image/png;base64,{}", STANDARD.encode(png)),
+        count: deck.count,
+        data_url: url,
     })
 }
 

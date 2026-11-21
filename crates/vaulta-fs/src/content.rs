@@ -90,8 +90,20 @@ fn text_type(path: &Path) -> bool {
         )
     })
 }
-fn bytes(file: &File, path: &Path, limit: usize) -> Result<Option<Vec<u8>>> {
-    let mut data = Vec::new();
+pub fn is_searchable_rel(rel: &str) -> bool {
+    let path = Path::new(rel);
+    document_text::Format::from_extension(&extension(path)).is_some() || text_type(path)
+}
+fn bytes_bounded(
+    file: &File,
+    path: &Path,
+    size_hint: Option<u64>,
+    limit: usize,
+) -> Result<Option<Vec<u8>>> {
+    if size_hint.is_some_and(|s| s > limit as u64) {
+        return Ok(None);
+    }
+    let mut data = Vec::with_capacity(size_hint.map_or(0, |s| (s as usize).min(limit)));
     file.take(limit as u64 + 1)
         .read_to_end(&mut data)
         .map_err(|e| io_error("read bounded content", path, e))?;
@@ -103,16 +115,59 @@ fn inert_text(data: &[u8]) -> Option<&str> {
         .any(|c| c.is_control() && !matches!(c, '\t' | '\n' | '\r' | '\x0c')))
     .then_some(s)
 }
+fn contains_ci(haystack: &str, needle_lower: &str) -> bool {
+    if needle_lower.is_empty() {
+        return true;
+    }
+    if needle_lower.is_ascii() {
+        let nb = needle_lower.as_bytes();
+        let hb = haystack.as_bytes();
+        if nb.len() > hb.len() {
+            return false;
+        }
+        let first_lo = nb[0];
+        let first_hi = first_lo.to_ascii_uppercase();
+        let mut pos = 0;
+        let last = hb.len() - nb.len();
+        while pos <= last {
+            let found = if first_lo == first_hi {
+                memchr::memchr(first_lo, &hb[pos..=last])
+            } else {
+                memchr::memchr2(first_lo, first_hi, &hb[pos..=last])
+            };
+            let Some(off) = found else {
+                return false;
+            };
+            let idx = pos + off;
+            if hb[idx..idx + nb.len()].eq_ignore_ascii_case(nb) {
+                return true;
+            }
+            pos = idx + 1;
+        }
+        return false;
+    }
+    haystack.to_lowercase().contains(needle_lower)
+}
 fn revision(id: &str, data: &[u8]) -> String {
+    revision_parts(id, false, data)
+}
+fn revision_parts(id: &str, bom: bool, data: &[u8]) -> String {
     // Bind the content digest to the OS file identity to detect replacement with identical bytes.
     let mut hash = Sha256::new();
     hash.update(b"vaulta:text:v1\0");
     hash.update(id.as_bytes());
+    if bom {
+        hash.update(b"\xef\xbb\xbf");
+    }
     hash.update(data);
     format!("v1:{:x}", hash.finalize())
 }
+fn read_text_sized(file: &File, path: &Path, size_hint: Option<u64>) -> Result<Option<Vec<u8>>> {
+    Ok(bytes_bounded(file, path, size_hint, MAX_TEXT_BYTES)?
+        .filter(|data| inert_text(data).is_some()))
+}
 fn read_text(file: &File, path: &Path) -> Result<Option<Vec<u8>>> {
-    Ok(bytes(file, path, MAX_TEXT_BYTES)?.filter(|data| inert_text(data).is_some()))
+    read_text_sized(file, path, None)
 }
 fn preview_of(kind: PreviewKind) -> Preview {
     Preview {
@@ -168,9 +223,11 @@ fn media_header(mime: &str, d: &[u8]) -> bool {
 fn read_document(
     file: &File,
     path: &Path,
+    size_hint: Option<u64>,
     format: document_text::Format,
 ) -> Result<Option<String>> {
-    Ok(bytes(file, path, document_text::MAX_INPUT)?.and_then(|data| format.extract(&data)))
+    Ok(bytes_bounded(file, path, size_hint, document_text::MAX_INPUT)?
+        .and_then(|data| format.extract(&data)))
 }
 
 const MAX_RENDER_BYTES: usize = 64 * 1024 * 1024;
@@ -194,7 +251,7 @@ impl RenderSource {
     }
 
     pub fn into_bytes(self) -> Result<Vec<u8>> {
-        bytes(&self.0.file, &self.0.path, MAX_RENDER_BYTES)?
+        bytes_bounded(&self.0.file, &self.0.path, Some(self.0.size()), MAX_RENDER_BYTES)?
             .ok_or(Error::Unsupported("document preview is limited to 64 MiB"))
     }
 
@@ -246,18 +303,10 @@ pub fn open_render_source(
     if asset.is_dir || render_kind(&extension(&asset.path)) != Some(kind) {
         return Err(Error::Unsupported("not a supported document format"));
     }
-    if render_size(&asset)? > MAX_RENDER_BYTES as u64 {
+    if asset.size() > MAX_RENDER_BYTES as u64 {
         return Err(Error::Unsupported("document preview is limited to 64 MiB"));
     }
     Ok(RenderSource(asset))
-}
-
-fn render_size(asset: &Asset) -> Result<u64> {
-    Ok(asset
-        .file
-        .metadata()
-        .map_err(|e| io_error("inspect document", &asset.path, e))?
-        .len())
 }
 
 /// Inert UTF-8 source, native document routing, or bounded raster/audio/video.
@@ -271,36 +320,65 @@ pub fn preview(root: &Path, rel: &str) -> Result<Preview> {
         return Ok(preview_of(PreviewKind::Directory));
     }
     if text_type(&asset.path) {
-        let Some(data) = read_text(&asset.file, &asset.path)? else {
+        let Some(mut data) = read_text_sized(&asset.file, &asset.path, Some(asset.size()))? else {
             return Ok(unsupported("Text must be UTF-8 and no larger than 2 MiB."));
         };
         let mut result = preview_of(PreviewKind::Text);
-        result.text = inert_text(&data).map(str::to_owned);
         result.mime = Some("text/plain".into());
-        if info(&asset.file, &asset.path)?.nNumberOfLinks == 1 {
+        if asset.info.nNumberOfLinks == 1 {
             result.revision = Some(revision(&identity_key(&asset.file, &asset.path)?, &data));
         } else {
             result.message = Some("Hard-linked files are read-only in Vaulta.".into());
         }
+        if data.starts_with(b"\xef\xbb\xbf") {
+            data.drain(..3);
+        }
+        result.text = String::from_utf8(data).ok();
         return Ok(result);
     }
     let ext = extension(&asset.path);
     if let Some(kind) = render_kind(&ext) {
-        return Ok(if render_size(&asset)? > MAX_RENDER_BYTES as u64 {
+        return Ok(if asset.size() > MAX_RENDER_BYTES as u64 {
             unsupported("文档预览上限为 64 MiB。")
         } else {
             preview_of(kind)
         });
     }
     if let Some((kind, mime)) = media_type(&ext) {
-        let Some(data) = bytes(&asset.file, &asset.path, MAX_MEDIA_BYTES)? else {
+        if asset.size() > MAX_MEDIA_BYTES as u64 {
             return Ok(unsupported("Media preview is limited to 12 MiB."));
-        };
-        if !media_header(mime, &data) {
+        }
+        let mut head = [0u8; 12];
+        let mut head_len = 0;
+        while head_len < head.len() {
+            let n = (&asset.file)
+                .read(&mut head[head_len..])
+                .map_err(|e| io_error("read media header", &asset.path, e))?;
+            if n == 0 {
+                break;
+            }
+            head_len += n;
+        }
+        if !media_header(mime, &head[..head_len]) {
             return Ok(unsupported("Content does not match the media format."));
         }
+        let cap = (asset.size() as usize).min(MAX_MEDIA_BYTES).max(head_len);
+        let mut data = Vec::with_capacity(cap);
+        data.extend_from_slice(&head[..head_len]);
+        let rem = MAX_MEDIA_BYTES.saturating_sub(head_len);
+        (&asset.file)
+            .take(rem as u64 + 1)
+            .read_to_end(&mut data)
+            .map_err(|e| io_error("read bounded content", &asset.path, e))?;
+        if data.len() > MAX_MEDIA_BYTES {
+            return Ok(unsupported("Media preview is limited to 12 MiB."));
+        }
+        let prefix = format!("data:{mime};base64,");
+        let mut url = String::with_capacity(prefix.len() + data.len().div_ceil(3) * 4);
+        url.push_str(&prefix);
+        STANDARD.encode_string(&data, &mut url);
         return Ok(Preview {
-            data_url: Some(format!("data:{mime};base64,{}", STANDARD.encode(data))),
+            data_url: Some(url),
             mime: Some(mime.into()),
             ..preview_of(kind)
         });
@@ -320,16 +398,18 @@ pub fn text_matches(root: &Path, rel: &str, query: &str) -> Result<bool> {
     }
     let query = query.to_lowercase();
     if let Some(format) = document_text::Format::from_extension(&extension(&asset.path)) {
-        return Ok(read_document(&asset.file, &asset.path, format)?
-            .is_some_and(|s| s.to_lowercase().contains(&query)));
+        return Ok(read_document(&asset.file, &asset.path, Some(asset.size()), format)?
+            .is_some_and(|s| contains_ci(&s, &query)));
     }
     if !text_type(&asset.path) {
         return Ok(false);
     }
-    Ok(read_text(&asset.file, &asset.path)?
-        .as_deref()
-        .and_then(inert_text)
-        .is_some_and(|s| s.to_lowercase().contains(&query)))
+    Ok(
+        bytes_bounded(&asset.file, &asset.path, Some(asset.size()), MAX_TEXT_BYTES)?
+            .as_deref()
+            .and_then(inert_text)
+            .is_some_and(|s| contains_ci(s, &query)),
+    )
 }
 
 struct Tx(HANDLE);
@@ -437,16 +517,21 @@ fn save_impl(
             "only supported UTF-8 text files are editable",
         ));
     }
-    verify(&asset.file, &asset.path, expected_identity)?;
     let id = identity_key(&asset.file, &asset.path)?;
-    if info(&asset.file, &asset.path)?.nNumberOfLinks != 1 {
+    if let Some(wanted) = expected_identity {
+        if id != wanted {
+            return Err(Error::Conflict);
+        }
+    }
+    if asset.info.nNumberOfLinks != 1 {
         return Err(Error::Refused("hard-linked files are read-only".into()));
     }
     let mut writer = Writer::open(&asset.path)?;
     let file = &mut writer.file;
-    if real(file, &asset.path)?
+    let (writer_is_dir, writer_info) = real_info(file, &asset.path)?;
+    if writer_is_dir
         || identity_key(file, &asset.path)? != id
-        || info(file, &asset.path)?.nNumberOfLinks != 1
+        || writer_info.nNumberOfLinks != 1
     {
         return Err(Error::Conflict);
     }
@@ -482,58 +567,108 @@ fn save_impl(
             "text committed, but the pinned file's identity could not be confirmed".into(),
         ));
     }
-    let mut committed = Vec::with_capacity(text.len() + usize::from(bom) * 3);
-    if bom {
-        committed.extend_from_slice(b"\xef\xbb\xbf");
-    }
-    committed.extend_from_slice(text.as_bytes());
     Ok(crate::TextSave {
         path: dos(&asset.path),
-        revision: revision(&id, &committed),
+        revision: revision_parts(&id, bom, text.as_bytes()),
     })
+}
+
+fn partial_hash(file: &mut File, size: u64, buf: &mut [u8], path: &Path) -> Result<[u8; 32]> {
+    const SAMPLE: usize = 8 * 1024;
+    let mut hasher = Sha256::new();
+    let mut read_exact_sample = |file: &mut File, len: usize| -> Result<()> {
+        let mut got = 0;
+        while got < len {
+            let n = file
+                .read(&mut buf[got..len])
+                .map_err(|e| io_error("hash file", path, e))?;
+            if n == 0 {
+                return Err(Error::Conflict);
+            }
+            got += n;
+        }
+        hasher.update(&buf[..len]);
+        Ok(())
+    };
+    read_exact_sample(file, SAMPLE)?;
+    file.seek(io::SeekFrom::Start(size - SAMPLE as u64))
+        .map_err(|e| io_error("hash file", path, e))?;
+    read_exact_sample(file, SAMPLE)?;
+    Ok(hasher.finalize().into())
+}
+
+fn full_hash(file: &mut File, size: u64, buf: &mut [u8], path: &Path) -> Result<[u8; 32]> {
+    let mut hasher = Sha256::new();
+    let mut total = 0u64;
+    loop {
+        let n = file
+            .read(buf)
+            .map_err(|e| io_error("hash file", path, e))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        total += n as u64;
+    }
+    if total != size {
+        return Err(Error::Conflict);
+    }
+    Ok(hasher.finalize().into())
 }
 
 /// Groups file contents, not identities. Inputs are checked paths; directories are ignored.
 /// Streams SHA-256 only for size buckets with at least two distinct paths.
 pub fn duplicate_groups(root: &Path, paths: &[String]) -> Result<Vec<Vec<String>>> {
-    Dir::absolute(root)?;
+    const PARTIAL_THRESHOLD: u64 = 64 * 1024;
+    let root_dir = Dir::absolute(root)?;
     let mut seen = HashSet::new();
     let mut sizes = BTreeMap::<u64, Vec<(String, Identity)>>::new();
     for rel in paths {
-        let asset = Asset::open(root, rel, 0, FILE_SHARE_READ)?;
+        let asset = Asset::open_under(&root_dir, rel, 0, FILE_SHARE_READ)?;
         if asset.is_dir || !seen.insert(asset.path.clone()) {
             continue;
         }
-        let info = info(&asset.file, &asset.path)?;
-        let size = (u64::from(info.nFileSizeHigh) << 32) | u64::from(info.nFileSizeLow);
+        let size = asset.size();
         sizes.entry(size).or_default().push((
             parts(rel, false)?.join("/"),
             identity(&asset.file, &asset.path)?,
         ));
     }
     let mut duplicates = Vec::new();
+    let mut buf = vec![0u8; 128 * 1024];
     for (size, bucket) in sizes.into_iter().filter(|(_, b)| b.len() > 1) {
-        let mut hashes = BTreeMap::<[u8; 32], Vec<String>>::new();
-        for (rel, id) in bucket {
-            let mut asset = Asset::open(root, &rel, FILE_GENERIC_READ.0, FILE_SHARE_READ)?;
-            if identity(&asset.file, &asset.path)? != id || asset.is_dir {
-                return Err(Error::Conflict);
+        let candidates: Vec<Vec<(String, Identity)>> = if size > PARTIAL_THRESHOLD {
+            let mut partial = BTreeMap::<[u8; 32], Vec<(String, Identity)>>::new();
+            for (rel, id) in bucket {
+                let mut asset =
+                    Asset::open_under(&root_dir, &rel, FILE_GENERIC_READ.0, FILE_SHARE_READ)?;
+                if identity(&asset.file, &asset.path)? != id || asset.is_dir || asset.size() != size
+                {
+                    return Err(Error::Conflict);
+                }
+                let key = partial_hash(&mut asset.file, size, &mut buf, &asset.path)?;
+                partial.entry(key).or_default().push((rel, id));
             }
-            let mut hasher = Sha256::new();
-            let n = io::copy(&mut asset.file, &mut hasher)
-                .map_err(|e| io_error("hash file", &asset.path, e))?;
-            if n != size {
-                return Err(Error::Conflict);
+            partial.into_values().filter(|g| g.len() > 1).collect()
+        } else {
+            vec![bucket]
+        };
+        for group in candidates {
+            let mut hashes = BTreeMap::<[u8; 32], Vec<String>>::new();
+            for (rel, id) in group {
+                let mut asset =
+                    Asset::open_under(&root_dir, &rel, FILE_GENERIC_READ.0, FILE_SHARE_READ)?;
+                if identity(&asset.file, &asset.path)? != id || asset.is_dir {
+                    return Err(Error::Conflict);
+                }
+                let digest = full_hash(&mut asset.file, size, &mut buf, &asset.path)?;
+                hashes.entry(digest).or_default().push(rel);
             }
-            hashes
-                .entry(hasher.finalize().into())
-                .or_default()
-                .push(rel);
+            duplicates.extend(hashes.into_values().filter(|g| g.len() > 1).map(|mut g| {
+                g.sort();
+                g
+            }));
         }
-        duplicates.extend(hashes.into_values().filter(|g| g.len() > 1).map(|mut g| {
-            g.sort();
-            g
-        }));
     }
     duplicates.sort();
     Ok(duplicates)

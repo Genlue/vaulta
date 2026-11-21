@@ -9,6 +9,7 @@ use std::{
         io::{AsRawHandle, FromRawHandle},
     },
     path::{Component, Path, PathBuf, Prefix},
+    sync::Arc,
 };
 use windows::{
     core::PCWSTR,
@@ -53,23 +54,29 @@ pub(crate) fn valid_component(s: &str, allow_reserved: bool) -> bool {
     {
         return false;
     }
-    let stem = s
-        .split('.')
-        .next()
-        .unwrap_or_default()
-        .trim_end()
-        .to_ascii_uppercase();
-    !matches!(
-        stem.as_str(),
-        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
-    ) && !["COM", "LPT"].iter().any(|p| {
-        stem.strip_prefix(p).is_some_and(|v| {
-            matches!(
-                v,
+    let stem = s.split('.').next().unwrap_or_default().trim_end();
+    if matches!(stem.len(), 3 | 6 | 7)
+        && (stem.eq_ignore_ascii_case("CON")
+            || stem.eq_ignore_ascii_case("PRN")
+            || stem.eq_ignore_ascii_case("AUX")
+            || stem.eq_ignore_ascii_case("NUL")
+            || stem.eq_ignore_ascii_case("CONIN$")
+            || stem.eq_ignore_ascii_case("CONOUT$"))
+    {
+        return false;
+    }
+    if let Some(prefix) = stem.get(..3) {
+        if prefix.eq_ignore_ascii_case("COM") || prefix.eq_ignore_ascii_case("LPT") {
+            let suffix = &stem[3..];
+            if matches!(
+                suffix,
                 "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
-            )
-        })
-    })
+            ) {
+                return false;
+            }
+        }
+    }
+    true
 }
 pub(crate) fn parts(rel: &str, empty_ok: bool) -> Result<Vec<&str>> {
     if empty_ok && rel.is_empty() {
@@ -185,8 +192,9 @@ pub(crate) fn tag(file: &File, path: &Path) -> Result<FILE_ATTRIBUTE_TAG_INFO> {
     .map_err(|e| win_error("inspect reparse tag", path, e))?;
     Ok(tag)
 }
-pub(crate) fn real(file: &File, path: &Path) -> Result<bool> {
-    let attrs = info(file, path)?.dwFileAttributes;
+pub(crate) fn real_info(file: &File, path: &Path) -> Result<(bool, BY_HANDLE_FILE_INFORMATION)> {
+    let file_info = info(file, path)?;
+    let attrs = file_info.dwFileAttributes;
     if attrs & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
         return Err(Error::Reparse(path.into()));
     }
@@ -196,10 +204,25 @@ pub(crate) fn real(file: &File, path: &Path) -> Result<bool> {
             path: path.into(),
         });
     }
-    Ok(attrs & FILE_ATTRIBUTE_DIRECTORY.0 != 0)
+    Ok((attrs & FILE_ATTRIBUTE_DIRECTORY.0 != 0, file_info))
+}
+pub(crate) fn real(file: &File, path: &Path) -> Result<bool> {
+    Ok(real_info(file, path)?.0)
 }
 pub(crate) fn final_path(file: &File, path: &Path) -> Result<PathBuf> {
-    let mut buf = vec![0u16; 512];
+    let mut stack = [0u16; 512];
+    let n = unsafe { GetFinalPathNameByHandleW(raw(file), &mut stack, VOLUME_NAME_DOS) } as usize;
+    if n == 0 {
+        return Err(io_error(
+            "read normalized Windows path",
+            path,
+            io::Error::last_os_error(),
+        ));
+    }
+    if n < stack.len() {
+        return Ok(OsString::from_wide(&stack[..n]).into());
+    }
+    let mut buf = vec![0u16; n + 1];
     loop {
         let n = unsafe { GetFinalPathNameByHandleW(raw(file), &mut buf, VOLUME_NAME_DOS) } as usize;
         if n == 0 {
@@ -226,11 +249,17 @@ fn check_actual_name(path: &Path, allow_reserved: bool) -> Result<()> {
     }
 }
 
+struct DirNode {
+    _parent: Option<Arc<DirNode>>,
+    handle: File,
+}
+
 /// Holds non-delete-sharing directory handles for every ancestor above the drive root.
 /// All absolute paths used for I/O are verified normalized volume paths, not unchecked DOS aliases.
+#[derive(Clone)]
 pub(crate) struct Dir {
     pub(crate) path: PathBuf,
-    handles: Vec<File>,
+    node: Arc<DirNode>,
 }
 impl Dir {
     pub(crate) fn absolute(path: &Path) -> Result<Self> {
@@ -271,7 +300,10 @@ impl Dir {
         }
         let mut dir = Self {
             path: actual,
-            handles: vec![handle],
+            node: Arc::new(DirNode {
+                _parent: None,
+                handle,
+            }),
         };
         for part in components {
             dir.push(OsStr::new(part), false)?;
@@ -287,25 +319,19 @@ impl Dir {
             return Err(Error::InvalidPath(path.display().to_string()));
         }
         self.path = actual;
-        self.handles.push(handle);
+        self.node = Arc::new(DirNode {
+            _parent: Some(Arc::clone(&self.node)),
+            handle,
+        });
         Ok(())
     }
     pub(crate) fn child(&self, name: &OsStr, allow_reserved: bool) -> Result<Self> {
-        let handles = self
-            .handles
-            .iter()
-            .map(File::try_clone)
-            .collect::<io::Result<Vec<_>>>()
-            .map_err(|e| io_error("duplicate pinned directory handle", &self.path, e))?;
-        let mut result = Self {
-            path: self.path.clone(),
-            handles,
-        };
+        let mut result = self.clone();
         result.push(name, allow_reserved)?;
         Ok(result)
     }
     pub(crate) fn handle(&self) -> &File {
-        self.handles.last().expect("dir always owns a handle")
+        &self.node.handle
     }
 }
 fn directory(path: &Path) -> Result<File> {
@@ -328,23 +354,36 @@ pub(crate) struct Asset {
     pub(crate) path: PathBuf,
     pub(crate) file: File,
     pub(crate) is_dir: bool,
+    pub(crate) info: BY_HANDLE_FILE_INFORMATION,
 }
 impl Asset {
+    pub(crate) fn size(&self) -> u64 {
+        (u64::from(self.info.nFileSizeHigh) << 32) | u64::from(self.info.nFileSizeLow)
+    }
     pub(crate) fn open(
         root: &Path,
         rel: &str,
         access: u32,
         share: FILE_SHARE_MODE,
     ) -> Result<Self> {
+        let root_dir = Dir::absolute(root)?;
+        Self::open_under(&root_dir, rel, access, share)
+    }
+    pub(crate) fn open_under(
+        root: &Dir,
+        rel: &str,
+        access: u32,
+        share: FILE_SHARE_MODE,
+    ) -> Result<Self> {
         let parts = parts(rel, false)?;
         let (leaf, ancestors) = parts.split_last().expect("nonempty relative path");
-        let mut parent = Dir::absolute(root)?;
+        let mut parent = root.clone();
         for part in ancestors {
             parent.push(OsStr::new(part), false)?;
         }
         let path = parent.path.join(leaf);
         let file = file_open(&path, access | FILE_READ_ATTRIBUTES.0, share, OPEN_EXISTING)?;
-        let is_dir = real(&file, &path)?;
+        let (is_dir, info) = real_info(&file, &path)?;
         let actual = final_path(&file, &path)?;
         check_actual_name(&actual, false)?;
         if actual.parent() != Some(parent.path.as_path()) {
@@ -355,6 +394,7 @@ impl Asset {
             path: actual,
             file,
             is_dir,
+            info,
         })
     }
 }

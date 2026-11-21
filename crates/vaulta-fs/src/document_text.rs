@@ -35,8 +35,16 @@ impl Format {
             Self::Pdf => pdf::extract(input, &mut out)?,
             _ => office::extract(self, input, &mut out)?,
         }
-        let text = out.0.trim();
-        (!text.is_empty()).then(|| text.to_owned())
+        let start = out.0.len() - out.0.trim_start().len();
+        let end = out.0.trim_end().len();
+        if start >= end {
+            return None;
+        }
+        out.0.truncate(end);
+        if start > 0 {
+            out.0.drain(..start);
+        }
+        Some(out.0)
     }
 }
 
@@ -49,13 +57,20 @@ impl Text {
             return None;
         }
         // Keep all extracted previews inert, including uncommon controls from fonts/XML.
-        self.0.extend(text.chars().map(|c| {
-            if c.is_control() && !matches!(c, '\t' | '\n' | '\r') {
-                ' '
-            } else {
-                c
-            }
-        }));
+        if text
+            .chars()
+            .any(|c| c.is_control() && !matches!(c, '\t' | '\n' | '\r'))
+        {
+            self.0.extend(text.chars().map(|c| {
+                if c.is_control() && !matches!(c, '\t' | '\n' | '\r') {
+                    ' '
+                } else {
+                    c
+                }
+            }));
+        } else {
+            self.0.push_str(text);
+        }
         Some(())
     }
 

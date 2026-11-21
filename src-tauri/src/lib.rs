@@ -23,7 +23,9 @@ pub fn database_path() -> Result<PathBuf> {
 /// Read-only host and CLI operations do not queue behind a filesystem walk.
 pub fn read<T>(path: &Path, f: impl FnOnce(&Core) -> Result<T>) -> Result<T> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        if !parent.is_dir() {
+            fs::create_dir_all(parent)?;
+        }
     }
     f(&Core::open(path).map_err(|e| anyhow::anyhow!("{e}"))?)
 }
@@ -32,7 +34,9 @@ pub fn read<T>(path: &Path, f: impl FnOnce(&Core) -> Result<T>) -> Result<T> {
 /// No stale-file cleanup is needed: Windows releases the lock on process exit.
 pub fn locked<T>(path: &Path, f: impl FnOnce(&mut Core) -> Result<T>) -> Result<T> {
     let parent = path.parent().context("无效的数据库位置")?;
-    fs::create_dir_all(parent)?;
+    if !parent.is_dir() {
+        fs::create_dir_all(parent)?;
+    }
     let guard: File = OpenOptions::new()
         .read(true)
         .write(true)
