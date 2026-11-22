@@ -10,7 +10,7 @@
 #   .\rebuild.cmd                 打包，补丁号 +1（仓库惯例）
 #   .\rebuild.cmd -NoBump         原地重打当前版本，覆盖同名产物
 #   .\rebuild.cmd -Test           先跑前端冒烟测试，通过后再打包
-#   .\rebuild.cmd -SyncGlass      先从隔壁 GlassDesign 同步玻璃资源再打包
+#   .\rebuild.cmd -SyncGlass      先按固定 tag 同步上游 GlassDesign 再打包
 #   .\rebuild.cmd -Version 0.4.0  指定版本号
 #   .\rebuild.cmd -Offline        打包时禁用 Cargo 网络访问
 #   .\rebuild.cmd -NoPause        结束时不等待按键（供脚本/CI 调用）
@@ -42,21 +42,24 @@ function Write-Step([string]$Text) {
 
 try {
     if (-not (Test-Path -LiteralPath (Join-Path $root 'src-tauri/tauri.conf.json') -PathType Leaf)) {
-        throw "这里不是 vaulta 仓库根目录：$root"
+        throw "这里不是 Vaulta 仓库根目录：$root"
     }
 
     Write-Host ''
-    Write-Host 'vaulta 重建' -ForegroundColor Cyan
+    Write-Host 'Vaulta 重建' -ForegroundColor Cyan
     Write-Host "仓库：$root"
     Write-Host "PowerShell：$($PSVersionTable.PSVersion)"
 
-    # 隔壁 GlassDesign 的样式比 vendor 里新时，先提醒但不擅自重编 WASM。
+    # vendor 记录的是某个 tag 的构建产物；本地按 tag 拉下来的检出若已前进，
+    # 只提示，不擅自重编 WASM。
     if (-not $SyncGlass) {
-        $glassSource = Join-Path (Split-Path -Parent $root) 'GlassDesign/控件/css/glass.css'
-        $glassVendor = Join-Path $root 'frontend/vendor/glassdesign/glass.css'
-        if ((Test-Path -LiteralPath $glassSource -PathType Leaf) -and (Test-Path -LiteralPath $glassVendor -PathType Leaf)) {
-            if ((Get-Item -LiteralPath $glassSource).LastWriteTimeUtc -gt (Get-Item -LiteralPath $glassVendor).LastWriteTimeUtc) {
-                Write-Warning 'GlassDesign 的 glass.css 比 frontend/vendor 里的新。要一起更新请加 -SyncGlass。'
+        $manifest = Join-Path $root 'frontend/vendor/glassdesign/UPSTREAM.json'
+        $checkout = Join-Path $root 'target/glassdesign'
+        if ((Test-Path -LiteralPath $manifest -PathType Leaf) -and (Test-Path -LiteralPath (Join-Path $checkout '.git') -PathType Container)) {
+            $synced = (Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json).commit
+            $head = (& git -C $checkout rev-parse HEAD 2>$null)
+            if ($head -and $synced -and $head.Trim() -ne $synced) {
+                Write-Warning 'frontend/vendor/glassdesign 与 target/glassdesign 的检出不一致。要更新请加 -SyncGlass。'
             }
         }
     }
@@ -82,8 +85,8 @@ try {
 
     # 产物清单以 tauri.conf.json 为准：build-windows.ps1 可能刚把版本号 +1。
     $built = (Get-Content -LiteralPath (Join-Path $root 'src-tauri/tauri.conf.json') -Raw | ConvertFrom-Json).version
-    $setup = Join-Path $root "dist/vaulta_${built}_x64-setup.exe"
-    $zip = Join-Path $root "dist/vaulta-$built-windows-x64.zip"
+    $setup = Join-Path $root "dist/Vaulta_${built}_x64-setup.exe"
+    $zip = Join-Path $root "dist/Vaulta-$built-windows-x64.zip"
     foreach ($file in $setup, $zip) {
         if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "缺少产物：$file" }
     }

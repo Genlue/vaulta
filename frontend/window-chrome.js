@@ -27,7 +27,7 @@ function populate() {
   </div>`;
   root.innerHTML = `${widget(LIGHTS, { focused: state.focused, maximized: state.maximized }, {
     tag: 'div', className: 'window-chrome__lights', attrs: 'data-tauri-drag-region="false"', fallback,
-  })}<div class="window-chrome__drag" data-tauri-drag-region><span>vaulta</span></div>`;
+  })}<div class="window-chrome__drag" data-tauri-drag-region><span>Vaulta</span></div>`;
   mount(root);
   root.querySelector('.c-traffic')?.setAttribute('aria-label', '窗口控制');
   root.querySelector('.c-traffic')?.setAttribute('role', 'group');
@@ -83,7 +83,7 @@ function refreshOnResize() {
 }
 
 function reportError(error) {
-  console.error('vaulta window chrome:', error);
+  console.error('Vaulta window chrome:', error);
   if (!root?.querySelector('.window-chrome__feedback')) {
     const status = document.createElement('span');
     status.className = 'window-chrome__feedback sr-only';
@@ -134,7 +134,7 @@ export function installWindowChrome() {
 export async function setWindowChromeMode(selected) {
   if (selected !== NATIVE && selected !== LIGHTS) throw new Error('未知的标题栏样式。');
   await installWindowChrome();
-  if (!root || !canUseWindowChrome()) throw new Error('请在 vaulta 桌面应用中更改窗口标题栏。');
+  if (!root || !canUseWindowChrome()) throw new Error('请在 Vaulta 桌面应用中更改窗口标题栏。');
   if (changing) throw new Error('正在切换标题栏，请稍后重试。');
   changing = true;
   ++generation;

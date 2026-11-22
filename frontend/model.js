@@ -42,6 +42,9 @@ export function extension(item) {
   return item?.name?.match(/\.(\w{1,14})$/)?.[1]?.toLowerCase() ?? '';
 }
 const imageExt = /^(png|jpe?g|gif|webp|avif|ico|bmp|tiff?|svg|heic|heif|psd|ai|sketch|fig|xd|indd)$/;
+// Formats with a real grid preview. SVG is passed through as a vector;
+// HEIC, PSD and other design files keep their type glyph.
+const rasterThumbExt = /^(png|jpe?g|gif|webp|bmp|tiff?|ico|svg)$/;
 const videoExt = /^(mp4|mov|avi|mkv|webm|wmv|flv|m4v|mpg|mpeg)$/;
 const audioExt = /^(mp3|flac|wav|aac|m4a|opus|oga|ogg|wma|aiff?)$/;
 const sheetExt = /^(xlsx?|csv|tsv|ods|numbers)$/;
@@ -84,6 +87,11 @@ export function assetType(item) {
   if (item && typeof item === 'object') item._type = result;
   return result;
 }
+export const thumbnailable = item => !!item && item.kind === 'file' && item.state !== 'missing'
+  && rasterThumbExt.test(extension(item));
+// The cache key includes the revision facts, so a rescan or in-place edit
+// invalidates the old pixels without any extra round trip.
+export const thumbKey = item => `${assetKey(item)}|${item.identity ?? ''}|${item.modified ?? 0}|${item.size ?? 0}`;
 export function normalizeSnapshot(data, vault) {
   const v = { ...vault, ...data.vault };
   return { ...data, vault: v, categories: arr(data.categories), tags: labels(data.tags), history: arr(data.history),

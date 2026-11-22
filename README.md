@@ -1,4 +1,4 @@
-# vaulta
+# Vaulta
 
 面向 Windows 的本地数字资产仓库。把现有文件夹加为仓库，或选一个父目录新建仓库。磁盘上的文件照常使用；Vaulta 在其上额外维护 Inbox、主分类、标记和操作历史。不包含 AI 服务，不会自动上传仓库内容。
 
@@ -10,7 +10,7 @@
 
    从 0.3.1 及更早版本升级时，原本已经在列表里显示的资产会一次性视为已入库，避免资料库突然变空；升级后新发现的文件才进入收件箱。
 4. **关注标记** 是针对个别资产的主动关注行为。可在资产详情中添加标记，也可勾选后批量设置标记。这不会移动文件或改变入库状态。
-5. 拖动侧栏右缘可调宽度，拖动右侧详情栏的左缘同样可调宽。键盘聚焦分隔线后按方向键微调（`Shift` 加速），`Home` / `End` 可到两端。宽度会记住。**设置 → 通用** 可在侧边栏与悬浮导航栏之间切换，也可切换窗口标题栏样式。
+5. 拖动侧栏右缘可调宽度，拖动右侧详情栏的左缘同样可调宽。键盘聚焦分隔线后按方向键微调（`Shift` 加速），`Home` / `End` 可到两端。宽度会记住。**设置 → 通用** 可在侧边栏与悬浮导航栏之间切换，也可切换窗口标题栏样式。**玻璃效果** 在同一页切换：完整效果保留静态折射与色散，仅模糊只保留 CSS 背景模糊，性能优先关掉后景滤镜与顶部雾帘并改用不透明面。选择立即生效，刷新后保持。
 
 6. **重定位仓库**：把整个仓库移到同一磁盘卷的其他位置或改名后，从原仓库的 **管理 → 重定位仓库…** 选择新位置，无需移除并重新添加。资产、标签、视图与整体单元保留；软件不会移动文件。跨卷移动或选择副本会被拒绝，不会改写原绑定。
 7. **软件更新**：在 **设置 → 软件更新** 查看当前版本或手动检查。桌面应用启动时自动检查，运行期间每 6 小时再检查；只访问 GitHub 更新源，不上传本地仓库。安装版经确认后下载并验证签名，再启动安装程序；便携版从发布页下载压缩包。0.3.21 及更早版本需先手动安装一次此功能所在的版本。
@@ -24,7 +24,7 @@
 - **浮动顶栏**：红绿灯、侧栏开关、前进后退、仓库、搜索和操作在同一行，每件控件各自套一枚胶囊，间距统一 16px；品牌落在侧栏第二行，不再和胶囊抢位置。顶栏本身透明，内容滚到它下面时才出现渐进模糊。
 - **纯色背景**：页面最底层 `#wallpaper` 只是一块 `--canvas` 纯色，不截屏、不轮询；玻璃胶囊在这层纯色上做材质。列表表头随内容一起滚走，顶栏下方只保留一层渐进模糊。
 - **排序与文件夹优先**：排序菜单可选名称、修改日期、创建日期、大小、类型或路径，升降序切换。默认开启「文件夹优先」，文件夹在升序和降序下都排在最前；关闭后文件夹按当前排序键与文件混排。
-- **网格视图**：名称最多两行，下面依次显示「类型 · 大小」和修改日期；文件和文件夹各用自己的类型图标，便于扫一眼分辨。
+- **网格视图**：图片直接显示缩略图，按可见区域懒加载；无法解码、超大或已缺失的图片退回类型图标。名称最多两行，下面依次显示「类型 · 大小」和修改日期；文件夹和视频等类型仍用自己的图标。
 - **拖拽移动**：在「文件」或「资料库」里把文件、文件夹拖到普通文件夹的行或卡片上，确认后移动到该文件夹；多选时拖任意一项会带上全部选中项。文件夹不能拖进自身或下级目录，整体单元不接受拖入。真实磁盘路径会改变，不会复制内容。确认框可勾选「不再显示这个提醒」，之后直接移动；**设置 → 通用 → 拖拽移动前确认** 可随时改回每次确认。
 - **逐项处理**：在收件箱点「逐项处理」，侧栏会自动预览。可跳过、直接入库，或设置分类与标记后入库；成功后跳到下一项。当前筛选也会缩小待处理范围。跳过不改状态；入库会加入资料库并补上分类建议，但不移动文件。
 - **直接预览文档**：单击文件即可在右侧看原版式。PDF 可翻页和缩放，也支持没有文字层的扫描页。PPTX、PPSX 由桌面版 PowerPoint 逐张生成静态预览，可翻页和缩放。Word、Excel 及部分兼容格式使用 Windows 注册的预览器；如果无法渲染，可从侧栏用系统应用打开或在资源管理器中定位。
@@ -51,7 +51,7 @@ pwsh -NoProfile -File scripts/test-native-windows.ps1
 pwsh -NoProfile -File scripts/build-windows.ps1
 ```
 
-日常改完代码后，双击仓库根目录的 **`rebuild.cmd`** 就能一键重建：它按仓库惯例把补丁版本 +1，结束时列出安装包、便携包路径和 exe 的 FileVersion。常用参数：`-NoBump` 原地重打当前版本，`-Test` 先跑前端冒烟测试，`-SyncGlass` 先同步隔壁 GlassDesign 的玻璃资源，`-Version 0.4.0` 指定版本，`-Offline` 禁用 Cargo 联网，`-NoPause` 结束时不等待按键（给脚本调用）。
+日常改完代码后，双击仓库根目录的 **`rebuild.cmd`** 就能一键重建：它按仓库惯例把补丁版本 +1，结束时列出安装包、便携包路径和 exe 的 FileVersion。常用参数：`-NoBump` 原地重打当前版本，`-Test` 先跑前端冒烟测试，`-SyncGlass` 先按固定 tag 同步上游 GlassDesign 的玻璃资源，`-Version 0.4.0` 指定版本，`-Offline` 禁用 Cargo 联网，`-NoPause` 结束时不等待按键（给脚本调用）。
 
 该入口只走 PowerShell 7，不兼容 Windows PowerShell 5.1。`rebuild.cmd` 本身是纯 ASCII、先把控制台切到 UTF-8，中文提示放在 UTF-8 BOM 编码的 `scripts/rebuild.ps1` 里，所有路径都用引号和 `-LiteralPath`，因此在中文 Windows、中文路径和含空格的路径下都能正常打包。
 
@@ -59,7 +59,7 @@ pwsh -NoProfile -File scripts/build-windows.ps1
 
 发布 Windows x64 更新时，在 `main` 提交并推送版本修改，再运行 `pwsh -NoProfile -File scripts/release-windows.ps1 -Publish`。该脚本生成安装包、便携包、绑定版本号的 Tauri 更新签名和 `latest.json`，上传到 GitHub Release 草稿后才设为最新发布。可省略 `-Publish` 仅生成签名产物；签名器需支持 `--app-version`（例如 Tauri CLI 2.12.6，可用 `-TauriCli` 指定独立 `cargo-tauri.exe`）。更新私钥和密码不进 Git：应使用已有的 `TAURI_SIGNING_PRIVATE_KEY`（或 `TAURI_SIGNING_PRIVATE_KEY_PATH`）及 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`；此电脑也可读取 `%LOCALAPPDATA%\VaultaReleaseSigning` 下受密码保护的密钥和当前 Windows 用户可解密的密码。普通本地构建不要求有签名私钥。更新签名不等同于 Windows Authenticode 代码签名。
 
-普通构建直接使用已检入的 `frontend/vendor/glassdesign`，不要求安装 WASM 工具链。修改相邻的 GlassDesign 仓库后，在 Vaulta 根目录执行 `pwsh -NoProfile -File scripts/sync-glassdesign.ps1` 同步新产物；非默认位置可指定 `-GlassDesignPath`。对应的 `glass-web` 配置、组件属性、事件与生命周期在 GlassDesign 的 `web/README.md`。
+普通构建直接使用已检入的 `frontend/vendor/glassdesign`，不要求安装 WASM 工具链。该目录不是手工拷贝：`scripts/sync-glassdesign.ps1` 从上游 [GlassDesign](https://github.com/Genlue/GlassDesign) 的固定 tag（当前 `v0.10.1`）取源码，运行其 `scripts/build-web.ps1`，再把同一批 `glass_web.js` / `glass_web_bg.wasm` / `glass.css` / `glass-defs.svg` 与生成的 `icons.js` 写入；`UPSTREAM.json` 和 `PROVENANCE.md` 记录 tag、commit 与文件哈希。升级就在脚本里改 `-Ref` 后执行一次，`rebuild.cmd -SyncGlass` 会先做这一步。用本地检出调试时传 `-GlassDesignPath`，其余情况一律按 tag 拉取，避免把未发布的本地改动带进安装包。对应的 `glass-web` 配置、组件属性、事件与生命周期在 GlassDesign 的 `web/README.md`。
 
 `crates/vaulta-core` 管理 SQLite、身份核对、分类和历史；`crates/vaulta-fs` 提供 Windows 文件操作、预览和链接视图；`src-tauri` 提供窗口、后台同步、命令和 Agent CLI；`frontend` 提供界面。
 

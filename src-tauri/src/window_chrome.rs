@@ -61,7 +61,7 @@ fn write_mode(path: &Path, mode: ChromeMode) -> Result<()> {
 pub fn open(app: &App, database: &Path) -> Result<()> {
     let path = database.with_file_name(PREFERENCE);
     let mode = read_mode(&path).unwrap_or_else(|error| {
-        eprintln!("vaulta: {error:#}");
+        eprintln!("Vaulta: {error:#}");
         ChromeMode::default()
     });
     let mut config = app
@@ -84,7 +84,7 @@ fn check_window(window: &WebviewWindow) -> Reply<()> {
     if window.label() == MAIN {
         Ok(())
     } else {
-        Err("仅可操作 vaulta 主窗口。".into())
+        Err("仅可操作 Vaulta 主窗口。".into())
     }
 }
 

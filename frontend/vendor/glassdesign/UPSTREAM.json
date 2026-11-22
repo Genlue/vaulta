@@ -1,0 +1,12 @@
+{
+  "repository": "https://github.com/Genlue/GlassDesign",
+  "tag": "v0.10.1",
+  "commit": "e8acea592e17fccef38fbcf56dcdfc968eeb5e88",
+  "synced": "2026-11-22",
+  "files": {
+    "glass_web.js": "a6ec59ed8114dec4f6a78c5d7b70187b100bc49f315f213e536f536025452f0c",
+    "glass-defs.svg": "8d854ee15eaf6f2769b20349d7c52fa530edc2a1ec43287429e3b843dbe56de5",
+    "glass.css": "d485d39729bc165b2f0a3a11cf37a1f4335b98dce43ac72ebb51c530bf530dbe",
+    "glass_web_bg.wasm": "e458e5e09e92d98218fe963b1043b8ec304bc0130a550163eda14c6b07784b1e"
+  }
+}

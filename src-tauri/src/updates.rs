@@ -11,7 +11,7 @@ use tauri::{AppHandle, State};
 use tauri_plugin_updater::{Update, UpdaterExt};
 use winreg::{RegKey, enums::HKEY_CURRENT_USER};
 
-const RELEASE_PAGE: &str = "https://github.com/Genlue/vaulta/releases/latest";
+const RELEASE_PAGE: &str = "https://github.com/Genlue/Vaulta/releases/latest";
 
 #[derive(Default)]
 pub(crate) struct Updates {
@@ -48,7 +48,7 @@ fn nsis_install() -> bool {
         return false;
     };
     let user = RegKey::predef(HKEY_CURRENT_USER);
-    let Ok(key) = user.open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Uninstall\vaulta")
+    let Ok(key) = user.open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Vaulta")
     else {
         return false;
     };

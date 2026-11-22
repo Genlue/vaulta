@@ -1,6 +1,6 @@
 [package]
 name = "vaulta"
-version = "1.0.0"
+version = "1.0.3"
 description = "Local-first personal digital asset library"
 edition = "2024"
 rust-version = "1.90"
@@ -35,5 +35,6 @@ windows = { version = "0.62", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+image = { version = "0.25", default-features = false, features = ["bmp", "gif", "ico", "jpeg", "png", "tiff", "webp"] }
 vaulta-core = { path = "../crates/vaulta-core" }
 vaulta-fs = { path = "../crates/vaulta-fs" }

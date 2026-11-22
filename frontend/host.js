@@ -2,7 +2,7 @@
 // nested mutation payloads and responses use the core's snake_case schema.
 function invoke(name, args = {}) {
   const core = globalThis.__TAURI__?.core;
-  if (typeof core?.invoke !== 'function') return Promise.reject(new Error('请在 vaulta 桌面应用中使用此功能。'));
+  if (typeof core?.invoke !== 'function') return Promise.reject(new Error('请在 Vaulta 桌面应用中使用此功能。'));
   return core.invoke(name, args);
 }
 export const connected = () => typeof globalThis.__TAURI__?.core?.invoke === 'function';
@@ -18,6 +18,7 @@ export const host = {
   rescan: vaultId => invoke('rescan', { vaultId }),
   mutate: (vaultId, action) => invoke('mutate', { vaultId, action }),
   preview: (vaultId, assetId) => invoke('preview', { vaultId, assetId }),
+  thumbnail: (vaultId, assetId) => invoke('thumbnail', { vaultId, assetId }),
   pdfPage: (vaultId, assetId, page) => invoke('pdf_preview_page', { vaultId, assetId, page }),
   slidePage: (vaultId, assetId, request) => invoke('slides_preview_page', { vaultId, assetId, request }),
   officeOpen: (vaultId, assetId, session, confirmedSession) => invoke('office_preview_open', { vaultId, assetId, session, confirmedSession }),

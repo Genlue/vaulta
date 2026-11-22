@@ -6,7 +6,7 @@ import { createUpdates } from './updates.js';
 import { installWindowChrome, canUseWindowChrome, getWindowChromeMode, setWindowChromeMode } from './window-chrome.js';
 import { arr, unique, norm, pathKey, parentPath, splitPath, basename, absolute, containsPath, relative, normalizeSnapshot, makeCategoryIndex, ancestry,
   categoryOptions, folderIndex, visibleAssets, treeRows, searchAssets, assetType, assetKey, isDir, formatDate, formatBytes, defaultFlags, collator, markable, withinBoundary } from './model.js';
-import { esc, icon, act, button, ib, pill, visual, statePill, field, labeled, select, check, menuItem, menuLine, menuCaption, blank, infoRow, assetCard, assetRow, lines, segmented, themeSelect, inlineNotice } from './ui.js';
+import { esc, icon, act, button, ib, pill, visual, statePill, field, labeled, select, check, menuItem, menuLine, menuCaption, blank, infoRow, assetCard, assetRow, lines, segmented, settingSelect, inlineNotice } from './ui.js';
 
 const $ = selector => document.querySelector(selector);
 const chrome = $('#chrome'), gripHost = $('#rail-grip'), rail = $('#rail'), dockHost = $('#dock'), workspace = $('#workspace'), inspector = $('#inspector'), status = $('#status'), pop = $('#pop'), modal = $('#modal');
@@ -92,7 +92,7 @@ const pages = {
   home: ['仓库', 'house'], inbox: ['收件箱', 'inbox', '磁盘上发现、但还没加入资料库的文件，按文件夹分组；可以展开逐个入库，或把整个文件夹设为整体单元。'],
   all: ['资料库', 'bookmark', '已入库的资产，按磁盘文件夹分层显示；展开文件夹即可看到里面的文件。'], physical: ['文件', 'folder-tree', '按磁盘目录浏览。这里始终显示文件夹里的全部内容，不受入库状态影响。'],
   category: ['分类', 'layers', '主分类只改变逻辑归属，不会移动原文件。'],
-  flags: ['标记', 'flag', '标记用来记录关注状态，不影响分类或磁盘路径。'], recent: ['最近使用', 'clock', '显示在本机通过 vaulta 打开或预览过的资产。'],
+  flags: ['标记', 'flag', '标记用来记录关注状态，不影响分类或磁盘路径。'], recent: ['最近使用', 'clock', '显示在本机通过 Vaulta 打开或预览过的资产。'],
   duplicates: ['重复文件', 'copy', '按文件内容识别完全重复的资产。每一份原文件都会保留。'],
   excluded: ['已排除', 'ban', '这些项目保留在磁盘上，但不参与常规浏览和搜索。'],
   missing: ['已缺失', 'triangle-alert', '磁盘上找不到这些资产。只有确认身份后才应关联到其他文件。'],
@@ -102,14 +102,19 @@ const sortOptions = [['name', '名称'], ['modified', '修改日期'], ['created
 const typeOptions = [['', '所有类型'], ['file', '所有文件'], ['folder', '文件夹与整体单元'], ['image', '图像'], ['video', '视频'], ['audio', '音频'], ['document', '文档与其他文件']];
 const scopeOptions = [['current', '当前仓库'], ['selected', '所选仓库'], ['all', '全部仓库']];
 const themeOptions = [['system', '跟随系统'], ['light', '浅色'], ['dark', '深色']];
+const effectOptions = [['auto', '完整效果'], ['blur', '仅模糊'], ['solid', '性能优先']];
 const titlebarOptions = [['native', 'Windows 原生'], ['traffic-lights', 'macOS 红绿灯']];
 const navOptions = [['rail', '侧边栏'], ['dock', '悬浮导航栏']];
 const moveConfirmOptions = [['on', '每次确认'], ['off', '直接移动']];
 const accessOptions = [['off', '关闭'], ['read', '只读'], ['write', '读取与整理']];
 
 function toast(text, kind = 'ok', duration = 4200) {
-  const node = document.createElement('div'); node.className = `va-toast ${kind}`;
-  node.innerHTML = `${icon(kind === 'ok' ? 'circle-check' : kind === 'error' ? 'triangle-alert' : 'info', 19)}<span>${esc(text)}</span><button type="button" aria-label="关闭提示">${icon('x', 15)}</button>`;
+  // Same glass material and entrance as GlassDesign's ToastHost; the host owns
+  // placement, copy and the close affordance.
+  const node = document.createElement('div');
+  node.className = `va-toast c-toast${kind === 'error' ? ' c-toast--danger' : kind === 'warn' ? ' va-toast--warning' : ''}`;
+  node.setAttribute('role', kind === 'error' ? 'alert' : 'status');
+  node.innerHTML = `${icon(kind === 'ok' ? 'circle-check' : kind === 'error' ? 'triangle-alert' : 'info', 17)}<span class="va-toast__text">${esc(text)}</span><button type="button" class="va-toast__close" aria-label="关闭提示">${icon('x', 14)}</button>`;
   node.querySelector('button').onclick = () => node.remove(); const shelf = $('#toasts'); shelf.append(node);
   while (shelf.childElementCount > 1) shelf.firstElementChild.remove();
   setTimeout(() => node.remove(), duration);
@@ -159,6 +164,71 @@ function render({ keepScroll = true } = {}) {
     const target = [...(matching?.querySelectorAll('.c-seg__opt') || [])].find(e => e.dataset.value === focusedSegment[1]);
     target?.focus({ preventScroll: true });
   } else if (focusRegion && focusAction[0] && !prev.isConnected) [...focusRegion.querySelectorAll('[data-act]')].find(e => e.dataset.act === focusAction[0] && e.dataset.value === focusAction[1])?.focus({ preventScroll: true });
+  hydrateThumbs();
+}
+
+// Grid thumbnails are requested only for cards near the viewport, four at a
+// time, and cached by asset revision. A failed or unsupported file keeps its
+// type glyph instead of leaving a broken image in the grid.
+const thumbCache = new Map(), thumbFailed = new Set(), thumbQueue = [];
+let thumbObserver = null, thumbRoot = null, thumbActive = 0, thumbBytes = 0;
+const THUMB_PARALLEL = 4, THUMB_CACHE = 240, THUMB_BYTES = 24 * 1024 * 1024;
+function showThumb(img, url) {
+  img.src = url; img.dataset.thumbState = 'done';
+  img.closest('.tile-art')?.classList.add('has-image');
+}
+function failThumb(img) {
+  img.closest('.tile-art')?.classList.add('thumb-failed');
+  img.remove();
+}
+function rememberThumb(key, url) {
+  const previous = thumbCache.get(key);
+  if (previous) { thumbBytes -= previous.length; thumbCache.delete(key); }
+  thumbCache.set(key, url); thumbBytes += url.length;
+  while ((thumbBytes > THUMB_BYTES || thumbCache.size > THUMB_CACHE) && thumbCache.size) {
+    const [oldKey, oldUrl] = thumbCache.entries().next().value;
+    thumbCache.delete(oldKey); thumbBytes -= oldUrl.length;
+  }
+}
+function pumpThumbs() {
+  while (thumbActive < THUMB_PARALLEL && thumbQueue.length) {
+    const img = thumbQueue.shift();
+    if (!img.isConnected || img.dataset.thumbState !== 'queued') continue;
+    img.dataset.thumbState = 'loading'; thumbActive++;
+    host.thumbnail(img.dataset.thumbVault, img.dataset.thumbAsset)
+      .then(url => { rememberThumb(img.dataset.thumb, url); if (img.isConnected) showThumb(img, url); })
+      .catch(() => { thumbFailed.add(img.dataset.thumb); while (thumbFailed.size > 500) thumbFailed.delete(thumbFailed.values().next().value); if (img.isConnected) failThumb(img); })
+      .finally(() => { img.dataset.thumbState = 'done'; thumbActive--; pumpThumbs(); });
+  }
+}
+function hydrateThumbs() {
+  const stage = $('#stage');
+  if (prefs.layout !== 'grid' || !stage) { thumbObserver?.disconnect(); return; }
+  const imgs = [...stage.querySelectorAll('img.tile-thumb')];
+  if (!imgs.length) { thumbObserver?.disconnect(); return; }
+  // `render` rebuilds #stage, so an observer bound to the old scroll root would
+  // never see the new cards. Rebind whenever the root element changes.
+  if (thumbObserver && thumbRoot !== stage) { thumbObserver.disconnect(); thumbObserver = null; }
+  thumbRoot = stage;
+  thumbObserver ??= new IntersectionObserver(entries => {
+    const observer = thumbObserver;
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      observer.unobserve(entry.target);
+      entry.target.dataset.thumbState = 'queued';
+      thumbQueue.push(entry.target);
+    }
+    pumpThumbs();
+  }, { root: stage, rootMargin: '320px 0px' });
+  thumbObserver.disconnect();
+  for (const img of imgs) {
+    const key = img.dataset.thumb;
+    if (thumbFailed.has(key)) { failThumb(img); continue; }
+    const cached = thumbCache.get(key);
+    if (cached) { showThumb(img, cached); continue; }
+    if (img.dataset.thumbState) continue;
+    thumbObserver.observe(img);
+  }
 }
 let veilStage = null;
 function attachVeil() {
@@ -413,7 +483,7 @@ function navLink(page, label, symbol, value = page, options = {}) {
 function renderRail() {
   const hasVaults = !!S.registry.length;
   const inbox = getSnapshotIndex(snap()).inbox;
-  return `<div class="rail-brand" aria-label="vaulta"><img src="./assets/vaulta.png" alt=""><span>vaulta</span></div>
+  return `<div class="rail-brand" aria-label="Vaulta"><img src="./assets/vaulta.png" alt=""><span>Vaulta</span></div>
     <nav class="rail-scroll c-nav" id="rail-scroll" aria-label="主要导航"><section class="rail-section lead"><div class="rail-label">浏览</div>
     ${navLink('home', '仓库', 'house')}${hasVaults ? `${navLink('physical', '文件', 'folder-tree', 'physical', { active: S.page === 'physical' })}${navLink('all', '资料库', 'bookmark', 'all', { active: libraryPages.has(S.page) && !['physical', 'history'].includes(S.page) })}` : ''}</section>
     ${hasVaults ? `<section class="rail-section"><div class="rail-label">待办</div>${navLink('inbox', '收件箱', 'inbox', 'inbox', { count: inbox })}</section>` : ''}</nav>
@@ -813,15 +883,34 @@ function renderSettings() {
   const v = vault(), access = S.access.get(v?.id), info = S.api;
   const setting = (symbol, title, help, controls) => `<div class="setting"><span class="setting-icon">${icon(symbol, 20)}</span><div><h3>${esc(title)}</h3><p>${esc(help)}</p></div><div class="setting-control">${controls}</div></div>`;
   return `${errorStrip()}<div class="utility settings"><header class="page-heading"><div class="page-context">${icon('settings', 14)} 工作区</div><h1>设置</h1><p>管理外观、仓库与本地工具访问。</p></header>
-  <section class="settings-section"><h2>通用</h2>${setting('palette', '界面外观', '选择浅色、深色或跟随 Windows 系统设置。', themeSelect(themeOptions, prefs.theme))}${setting('panel-left', '导航栏形态', '侧边栏长期占位；悬浮导航是浮在内容上、跟随滚动位置的玻璃药丸。', select('navMode', navOptions, prefs.nav, 'aria-label="导航栏形态" data-setting="nav"'))}${setting('app-window', '窗口标题栏', '切换后立即生效，下次打开 vaulta 时保持所选样式。', canUseWindowChrome() ? widget('select', { label: '窗口标题栏', width: 148, options: titlebarOptions.map(([value, label]) => ({ value, label })), value: getWindowChromeMode() }, { key: 'titlebar-mode', action: 'titlebar-mode', fallback: select('titlebarPref', titlebarOptions, getWindowChromeMode(), 'aria-label="窗口标题栏" data-setting="titlebar"') }) : pill('仅桌面应用'))}${setting('layout-grid', '默认资产视图', '在列表和网格之间切换。', select('layoutPref', [['list','列表'],['grid','网格']], prefs.layout, 'aria-label="默认资产视图" data-setting="layout"'))}${setting('file-lines', '多页文档预览', '设置 PDF 与幻灯片演示文稿的默认查看方式（竖直流动或单页翻页）。', select('docPreview', [['flow','竖直流动'],['paged','单页翻页']], prefs.docPreview, 'aria-label="多页文档预览" data-setting="doc-preview"'))}${setting('move', '拖拽移动前确认', '关闭后，把文件拖到文件夹上会直接移动，不再每次询问。', select('moveConfirm', moveConfirmOptions, prefs.confirmMove ? 'on' : 'off', 'aria-label="拖拽移动前确认" data-setting="move-confirm"'))}</section>
+  <section class="settings-section"><h2>通用</h2>
+    ${setting('palette', '界面外观', '选择浅色、深色或跟随 Windows 系统设置。',
+      settingSelect({ label: '配色方案', options: themeOptions, value: prefs.theme, action: 'set-theme', setting: 'theme' }))}
+    ${setting('sparkles', '玻璃效果', '完整效果保留折射与色散；仅模糊只保留背景模糊；性能优先改用不透明面。',
+      settingSelect({ label: '玻璃效果', options: effectOptions, value: vaultaEffects.read(), action: 'glass-effects', setting: 'glass-effects' }))}
+    ${setting('panel-left', '导航栏形态', '侧边栏长期占位；悬浮导航是浮在内容上、跟随滚动位置的玻璃药丸。',
+      settingSelect({ label: '导航栏形态', options: navOptions, value: prefs.nav, action: 'nav-mode', setting: 'nav' }))}
+    ${setting('app-window', '窗口标题栏', '切换后立即生效，下次打开 Vaulta 时保持所选样式。',
+      canUseWindowChrome()
+        ? settingSelect({ label: '窗口标题栏', options: titlebarOptions, value: getWindowChromeMode(), action: 'titlebar-mode', setting: 'titlebar' })
+        : pill('仅桌面应用'))}
+    ${setting('layout-grid', '默认资产视图', '在列表和网格之间切换。',
+      settingSelect({ label: '默认资产视图', options: [['list', '列表'], ['grid', '网格']], value: prefs.layout, action: 'layout', setting: 'layout' }))}
+    ${setting('file-lines', '多页文档预览', '设置 PDF 与幻灯片演示文稿的默认查看方式（竖直流动或单页翻页）。',
+      settingSelect({ label: '多页文档预览', options: [['flow', '竖直流动'], ['paged', '单页翻页']], value: prefs.docPreview, action: 'doc-preview', setting: 'doc-preview' }))}
+    ${setting('move', '拖拽移动前确认', '关闭后，把文件拖到文件夹上会直接移动，不再每次询问。',
+      settingSelect({ label: '拖拽移动前确认', options: moveConfirmOptions, value: prefs.confirmMove ? 'on' : 'off', action: 'move-confirm', setting: 'move-confirm' }))}
+  </section>
   <section class="settings-section"><h2>${v?.parent_id ? '当前整体单元' : '当前仓库'}</h2>${v ? (v.parent_id ? `${setting('layers', v.name, `所属仓库：${sourceName(v.parent_id)}`, button('返回所属仓库', 'switch', { glyph: 'corner-up-left', style: 'secondary', value: v.parent_id }) + button('重命名', 'rename-vault', { glyph: 'square-pen', style: 'secondary', value: v.id }))}${setting('refresh-cw', '重新扫描', '检查磁盘和索引的变化。', button('扫描整体单元', 'rescan', { style: 'secondary', disabled: S.loading || !!S.scanning }))}` : `${setting('hard-drive', v.name, v.root, button('管理', 'manage-vault', { glyph: 'more', style: 'secondary', value: v.id }))}${setting('link', '磁盘分类视图', '以链接在磁盘展示逻辑分类，不复制或移动原文件。', button(v.view_enabled ? '已启用 · 配置' : '配置', 'view-config', { style: 'secondary' }))}${setting('refresh-cw', '重新扫描', '检查磁盘和索引的变化。', button('扫描仓库', 'rescan', { style: 'secondary', disabled: S.loading || !!S.scanning }))}`) : `<p class="utility-empty">请先打开一个仓库。${button('前往仓库', 'nav', { value: 'home', style: 'secondary' })}</p>`}</section>
   <section class="settings-section" id="update-settings">${renderUpdates()}</section>
-  <section class="settings-section"><h2>Agent CLI</h2>${setting('terminal', '外部工具访问', '按仓库授权；整体单元的权限独立设置。CLI 不可执行磁盘文件操作。', v && access ? select('access', accessOptions, access, 'aria-label="外部工具访问" data-setting="agent"') : v && S.accessLoading.has(v.id) ? pill('正在读取') : button('读取权限', 'load-access', { style: 'secondary', disabled: !v }))}
-    ${access === 'write' ? '<div class="agent-note">外部工具可修改当前仓库的整理信息。你可随时将权限切回只读或关闭。</div>' : ''}
+  <section class="settings-section"><h2>Agent CLI</h2>${setting('terminal', '外部工具访问', '按仓库授权；整体单元的权限独立设置。CLI 不可执行磁盘文件操作。', v && access
+    ? settingSelect({ label: '外部工具访问', options: accessOptions, value: access, action: 'set-access', setting: 'agent' })
+    : v && S.accessLoading.has(v.id) ? pill('正在读取') : button('读取权限', 'load-access', { style: 'secondary', disabled: !v }))}
+    ${access === 'write' ? `<div class="notice-row">${inlineNotice('warning', '外部工具可修改当前仓库的整理信息。你可随时将权限切回只读或关闭。')}</div>` : ''}
     <details class="agent-docs"><summary>命令与本地路径</summary><p>在终端中执行以下命令。<code>mutate</code> 从标准输入读取 JSON，需要「读取与整理」权限。</p><pre>vaulta-agent list\nvaulta-agent snapshot &lt;id&gt;\nvaulta-agent mutate &lt;id&gt;</pre>
       <dl>${v ? infoRow('当前仓库 ID', `<code>${esc(v.id)}</code>${ib('复制仓库 ID', 'copy-value', 'copy', { value: v.id })}`) : ''}
       ${info ? infoRow('可执行文件', `<code>${esc(info.executable)}</code>${ib('复制可执行文件路径', 'copy-value', 'copy', { value: info.executable })}`) + infoRow('数据库（勿直接编辑）', `<code>${esc(info.database)}</code>${ib('复制数据库路径', 'copy-value', 'copy', { value: info.database })}`) + (info.protocol != null ? infoRow('协议版本', esc(info.protocol)) : '') : ''}</dl></details>
-  </section><div class="settings-footer"><img src="./assets/vaulta.png" alt=""><span>vaulta</span></div></div>`;
+  </section><div class="settings-footer"><img src="./assets/vaulta.png" alt=""><span>Vaulta</span></div></div>`;
 }
 const office = officePreview(inspector, {
   blocked(session) {
@@ -873,9 +962,9 @@ function renderAssetDetails(a) {
   const category = ancestry(a.category_id, index).map(c => c.name).join(' / '), identity = typeof a.identity === 'string' ? a.identity : a.identity == null ? '' : JSON.stringify(a.identity);
   const inboxCount = isDir(a) ? folderInboxItems(a).length : 0;
   return `<div class="asset-profile">${visual(a, 'profile')}<h2 title="${esc(a.name)}">${esc(a.name)}</h2><div>${pill(assetType(a).name)}${a.synthetic ? '' : statePill(a)}</div></div>
-    <div class="detail-tools">${disabled ? '' : `${a.state === 'inbox' ? button('入库', 'file-in-one', { value: key, glyph: 'check', style: 'c-btn--primary' }) : inboxCount ? button(`全部入库 · ${inboxCount}`, 'file-in-folder', { value: key, glyph: 'check', style: 'c-btn--primary' }) : ''}${a.kind === 'directory' ? button('作为整体单元', 'unitize', { value: key, glyph: 'layers', style: 'secondary' }) : ''}${button(isDir(a) ? a.kind === 'unit' ? '进入整体单元' : '打开文件夹' : '打开文件', 'open-asset', { value: key, glyph: 'external-link', style: 'secondary' })}`}${ib('更多资产操作', 'asset-menu', 'more', { value: key })}</div>
-    ${a.state === 'missing' ? `<div class="detail-callout">${icon('triangle-alert', 16)}<span>找不到原文件，仅显示上次记录。</span>${button('核对并关联身份', 'recover-identity', { value: key, style: 'secondary' })}</div>` : ''}
-    ${a.state === 'excluded' ? `<div class="detail-callout">${icon('ban', 16)}<span>文件仍在磁盘上。</span>${button('重新纳入', 'restore-one', { value: key, style: 'secondary' })}</div>` : ''}
+    <div class="detail-tools">${disabled ? '' : `${a.state === 'inbox' ? button('入库', 'file-in-one', { value: key, glyph: 'check', style: 'c-btn--primary' }) : inboxCount ? button(`全部入库 · ${inboxCount}`, 'file-in-folder', { value: key, glyph: 'check', style: 'c-btn--primary' }) : ''}${a.kind === 'directory' ? button('整体单元', 'unitize', { value: key, glyph: 'layers', style: 'secondary' }) : ''}${button(isDir(a) ? a.kind === 'unit' ? '进入整体单元' : '打开文件夹' : '打开文件', 'open-asset', { value: key, glyph: 'external-link', style: 'secondary' })}`}${ib('更多资产操作', 'asset-menu', 'more', { value: key })}</div>
+    ${a.state === 'missing' ? `<div class="notice-row">${inlineNotice('warning', '找不到原文件，仅显示上次记录。')}${button('核对并关联身份', 'recover-identity', { value: key, style: 'secondary' })}</div>` : ''}
+    ${a.state === 'excluded' ? `<div class="notice-row">${inlineNotice('info', '文件仍在磁盘上。')}${button('重新纳入', 'restore-one', { value: key, style: 'secondary' })}</div>` : ''}
     ${!a.synthetic ? `<section class="inspect-section"><header><h3>整理信息</h3>${ib('编辑整理信息', 'organize-one', 'square-pen', { value: key, disabled: !live })}</header><dl>
       ${infoRow('主分类', esc(category || '未分类'))}${infoRow('标记', `${a.flags.length ? a.flags.map(t => pill(t, 'flag')).join('') : '<span class="muted">无标记</span>'}${live ? ib(a.flags.length ? '编辑标记' : '添加标记', 'mark-one', 'flag', { value: key }) : ''}`)}
     </dl></section>` : ''}
@@ -2027,6 +2116,9 @@ async function action(name, value, node) {
     case 'search-input': if (!composing) beginSearch(value); return;
     case 'titlebar-mode': try { await setWindowChromeMode(value); } catch (error) { render(); throw error; } return;
     case 'set-theme': prefs.theme = value; persist('theme', value); setTheme(); return;
+    // The attribute alone re-renders every glass surface; no component rebuild.
+    case 'glass-effects': vaultaEffects.save(value); return;
+    case 'set-access': return setAccess(value).catch(error => toast(msg(error), 'error'));
     case 'save-view': return saveView();
     case 'manage-view': return manageView(value || S.viewId);
     case 'rename-view': { const view = prefs.views.find(v => v.id === value); if (view && closeDialog()) saveView(view); return; }
@@ -2238,7 +2330,7 @@ async function action(name, value, node) {
     case 'load-access': return readAccess(S.id, true);
     case 'undo': {
       const id = S.id;
-      if (id && await ask('撤销上一次可撤销的操作？', '并非所有磁盘操作都可撤销。vaulta 会在安全的情况下恢复最近一次可撤销的变更。', { symbol: 'undo', submit: '撤销' })) {
+      if (id && await ask('撤销上一次可撤销的操作？', '并非所有磁盘操作都可撤销。Vaulta 会在安全的情况下恢复最近一次可撤销的变更。', { symbol: 'undo', submit: '撤销' })) {
         await host.mutate(id, { type: 'undo' }); await afterChanges([id]); toast('已撤销');
       } return;
     }
@@ -2447,6 +2539,7 @@ document.addEventListener('change', event => {
   else if (node.dataset.setting === 'nav') perform('nav-mode', node.value, node);
   else if (node.dataset.setting === 'move-confirm') perform('move-confirm', node.value, node);
   else if (node.dataset.setting === 'doc-preview') perform('doc-preview', node.value, node);
+  else if (node.dataset.setting === 'glass-effects') vaultaEffects.save(node.value);
   else if (node.dataset.setting === 'agent') setAccess(node.value).catch(error => toast(msg(error), 'error'));
 });
 let composing = false, commandComposing = false;

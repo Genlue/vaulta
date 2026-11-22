@@ -1,6 +1,6 @@
 /* 由 scripts/build-css.mjs 生成，请勿手改。
-   源：控件/css/src/{tokens,optics,base,layout,components}.css
-   顺序是契约：tokens → base → layout → components（64 个分区）→ optics（各面最终参数，必须最后）。 */
+   源：控件/css/src/{tokens,optics,base,layout,components,effects}.css
+   顺序是契约：tokens → base → layout → components（65 个分区）→ optics（各面最终参数）→ effects（降级兜底，必须最后）。 */
 
 /* ===== tokens.css ===== */
 /* ==========================================================================
@@ -85,7 +85,12 @@
      --------------------------------------------------------------------- */
   --surface-window: #ffffff;
   --surface-content: #ffffff;
+  /* 兜底表面：性能优先 / 局部 data-gd-solid / 系统“减少透明度”共用它。
+     用 light-dark() 跟随**使用处**的 color-scheme —— 浅色应用里的局部暗色舞台
+     （沉浸播放、看图、演示模式等，元素上写了 color-scheme: dark）也能拿到暗色兜底，
+     不会在暗底上突然出现一块白胶囊。前一行是旧引擎的静态回退。 */
   --surface-elevated: #ffffff;
+  --surface-elevated: light-dark(#ffffff, #26262a);
   --surface-sunken: #f5f5f7;
 
   --surface-card: #ffffff;
@@ -461,7 +466,7 @@ body {
   -webkit-user-select: none;
 }
 
-/* —— 壁纸层：窗口是透明的，玻璃材质靠它透出内容 —— */
+/* —— 壁纸层：玻璃材质的底层输入，默认使用内置合成渐变 --wallpaper —— */
 #wallpaper {
   position: fixed;
   inset: 0;
@@ -471,11 +476,10 @@ body {
   transition: opacity var(--dur-3) var(--ease-out);
 }
 
-/* 两种属性都认：宿主脚本写 data-source="host"，旧版页面写 data-has-image="1"。
-   只认其中一个会让壁纸静默退回合成渐变 —— 截屏明明成功，画面却没有任何变化。 */
-#wallpaper[data-has-image="1"],
-#wallpaper[data-source="host"] {
-  background: var(--wallpaper-image) center / cover no-repeat;
+/* 可选：应用显式传入 --wallpaper-image 与 data-has-image="1" 时覆盖默认渐变；
+   未设置 --wallpaper-image 时回落到内置合成渐变，避免背景变黑或变空。 */
+#wallpaper[data-has-image="1"] {
+  background: var(--wallpaper-image, var(--wallpaper)) center / cover no-repeat;
 }
 
 h1, h2, h3, h4, h5, h6, p, figure {
@@ -800,7 +804,7 @@ html[data-shell="host"] .l-app {
   position: absolute;
   inset: 0 auto 0 0;
   width: var(--nav-w);
-  z-index: 2;
+  z-index: 8;
   border-radius: inherit;
   border-top-right-radius: 0;
   border-bottom-right-radius: 0;
@@ -830,7 +834,7 @@ html[data-shell="host"] .l-app {
   width: var(--nav-w);
   min-width: var(--nav-w);
   overflow: hidden;
-  z-index: 1;
+  z-index: 8;
   transform: translateX(0);
   transition: transform var(--nav-dur) var(--nav-ease), visibility 0s;
   will-change: transform;
@@ -839,12 +843,14 @@ html[data-shell="host"] .l-app {
 /* 侧边形态：导航栏是**覆盖层**，不占列。
    占列的话，收起就必须改列宽，而列宽是布局属性 —— 重排 + 重绘每帧一次，
    帧率必然掉，而且它和 transform 不在同一条时间线上，中途会裂开。
-   做成覆盖层之后，内容列只认 margin-left，动画期间一次都不重排。 */
+   做成覆盖层之后，内容列只认 margin-left，动画期间一次都不重排。
+   z-index 必须高于内容区元素（.l-stage 1 / .c-topveil 2 / .c-wave 4 / .c-resizer 6），
+   同时低于顶栏 .c-topbar（10），展开/收起滑行时才不会被右侧内容区遮挡。 */
 .l-app > .l-nav,
 .l-app > .l-sidebar {
   position: absolute;
   inset: 0 auto 0 0;
-  z-index: 1;
+  z-index: 8;
 }
 
 .l-app--nav-hidden > .l-nav,
@@ -1024,8 +1030,10 @@ html[data-shell="host"] .l-app {
 .l-stack {
   display: flex;
   flex-direction: column;
+  gap: var(--s-5);
 }
 
+.l-stack--0 { gap: 0; }
 .l-stack--2 { gap: var(--s-2); }
 .l-stack--3 { gap: var(--s-3); }
 .l-stack--4 { gap: var(--s-4); }
@@ -1037,9 +1045,11 @@ html[data-shell="host"] .l-app {
 .l-row {
   display: flex;
   align-items: center;
+  gap: var(--s-4);
   min-width: 0;
 }
 
+.l-row--0 { gap: 0; }
 .l-row--2 { gap: var(--s-2); }
 .l-row--3 { gap: var(--s-3); }
 .l-row--4 { gap: var(--s-4); }
@@ -1509,9 +1519,10 @@ html[data-shell="host"] .l-app {
 
 .c-slider {
   --p: 0;
-  /* 拇指长宽比固定 3:2，宽度由高度推出来 —— 常规滑块和有级滑块共用同一个比例，
-     不会再出现 28×16（1.75）和 36×18（2.0）两种长宽比。改大小只改 --thumb-h。 */
-  --thumb-h: 16px;
+  /* 拇指长宽比固定 3:2（基准 24×16，与静态 SVG 滤镜 #gd-glass-thumb 逐像素对齐）。
+     改大小优先改 --thumb-scale（无单位缩放比，--thumb-h / --thumb-w 同步派生）。 */
+  --thumb-scale: 1;
+  --thumb-h: calc(16px * var(--thumb-scale));
   --thumb-ratio: 1.5;
   --thumb-w: calc(var(--thumb-h) * var(--thumb-ratio));
   --thumb-s: 1;
@@ -1545,9 +1556,11 @@ html[data-shell="host"] .l-app {
 /* 轨道：内侧凹陷，比表面低一层 */
 .c-slider__track {
   position: absolute;
+  top: 50%;
   left: calc(var(--thumb-w) / 2);
   right: calc(var(--thumb-w) / 2);
   height: 8px;
+  transform: translateY(-50%);
   border-radius: var(--r-pill);
   background: var(--surface-control-active);
   box-shadow: inset 0 0.5px 1.5px rgb(0 0 0 / calc(0.18 * var(--shadow-k))), inset 0 -0.5px 0 rgb(255 255 255 / 0.45);
@@ -1560,7 +1573,7 @@ html[data-shell="host"] .l-app {
 .c-slider__fill {
   position: absolute;
   inset: 0 auto 0 0;
-  width: calc(100% * var(--p) + 6px * var(--rf, 1));
+  width: calc(100% * var(--p) + var(--thumb-h) * 0.375 * var(--rf, 1));
   border-radius: 0 var(--r-pill) var(--r-pill) 0;
   background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 76%, #fff), var(--accent));
   box-shadow: inset 0 0.5px 0 rgb(255 255 255 / 0.40);
@@ -1600,16 +1613,20 @@ html[data-shell="host"] .l-app {
      才没露馅。把位移拆到独立的 `translate` 属性后，那条覆盖就管不住它了，
      于是 left 和 translate 各推一次，拇指跑到填充前面一大截 —— 别走回头路。 */
   left: calc(var(--thumb-w) / 2 + (100% - var(--thumb-w)) * var(--p));
-  width: var(--thumb-w);
-  height: var(--thumb-h);
-  margin-top: calc(var(--thumb-h) / -2);
-  margin-left: calc(var(--thumb-w) / -2);
-  border-radius: calc(var(--thumb-h) / 2);
+  /* 布局盒始终为 24×16（与 #gd-glass-thumb 位移贴图严格 1:1），
+     通过独立 translate: -50% -50% 严格锁死中心点到 (left, 50%)，
+     避免 63-glass-svg.css 覆盖宽高后 margin-top/left 与实际尺寸错配导致偏移。 */
+  width: 24px;
+  height: 16px;
+  translate: -50% -50%;
+  border-radius: var(--r-pill);
   /* 必须裁剪：高光层是小圆角矩形，不裁剪会在药丸圆角外露出直角 */
   overflow: hidden;
-  /* 三层：焦散弧 → 折射蓝弧 → 底部透镜聚色
+  /* 三层：焦散弧 → 折射色弧 → 底部透镜聚色
      折射用「以左侧为圆心的径向渐变」，它画出来的是弧，不是直线；
-     直线渐变会在玻璃里留下一条竖直硬边，正是「分界平直」的来源。 */
+     直线渐变会在玻璃里留下一条竖直硬边，正是「分界平直」的来源。
+     颜色优先读 --slider-fill-rgb（默认回落到 --accent-rgb），
+     自定义白/浅色进度条时拇指折射色不会继续伪装成主题强调色。 */
   background:
     /* 基础涂层：与其它七个面同一套 coating/coatingColor，0 = 完全无白膜。
        原生接管时 [data-glass] 会整层清掉，不再与滤镜的 flood 叠加。 */
@@ -1625,13 +1642,13 @@ html[data-shell="host"] .l-app {
     ),
     radial-gradient(
       115% 150% at 4% 50%,
-      rgb(var(--accent-rgb) / calc(0.5 * var(--lg-amount-k) * var(--rf, 1))) 0%,
-      rgb(var(--accent-rgb) / calc(0.42 * var(--lg-amount-k) * var(--rf, 1))) 38%,
-      rgb(var(--accent-rgb) / 0) 56%
+      rgb(var(--slider-fill-rgb, var(--accent-rgb)) / calc(0.5 * var(--lg-amount-k) * var(--rf, 1))) 0%,
+      rgb(var(--slider-fill-rgb, var(--accent-rgb)) / calc(0.42 * var(--lg-amount-k) * var(--rf, 1))) 38%,
+      rgb(var(--slider-fill-rgb, var(--accent-rgb)) / 0) 56%
     ),
     radial-gradient(
       130% 115% at 50% 120%,
-      rgb(var(--accent-rgb) / calc(0.5 * var(--lg-amount-k))),
+      rgb(var(--slider-fill-rgb, var(--accent-rgb)) / calc(0.5 * var(--lg-amount-k))),
       transparent 64%
     );
   backdrop-filter: blur(var(--thumb-blur-px))
@@ -1662,10 +1679,11 @@ html[data-shell="host"] .l-app {
     inset 0 1px 0 rgb(255 255 255 / calc(0.95 * var(--lg-css-stroke-alpha, var(--lg-stroke-alpha)))),
     inset 0 -1px 0 rgb(255 255 255 / calc(0.95 * var(--lg-css-stroke-alpha, var(--lg-stroke-alpha)) * var(--hl-bottom))),
     inset 0 -1px 2px rgb(0 0 0 / calc(0.12 * var(--shadow-k)));
-  /* 位置由上面的 `left` 百分比表达式负责，这里只做缩放。
+  /* 位置由上面的 `left` 与 `translate: -50% -50%` 负责，这里只做缩放（基础档位 × 按压弹放）。
      缩放留在 transform 上才有过渡；位移不放进 transform 是因为那条
      200ms 的按压过渡会连位移一起缓动（拖拽时每帧重起一次，拇指追不上指针）。 */
-  transform: scale(var(--thumb-s, 1));
+  transform-origin: 50% 50%;
+  transform: scale(calc(var(--thumb-s, 1) * var(--thumb-scale, 1)));
   will-change: transform;
 }
 
@@ -1787,6 +1805,7 @@ html[data-shell="host"] .l-app {
   display: flex;
   align-items: center;
   gap: var(--ctl-gap, var(--s-3));
+  min-width: 0;
   height: var(--ctl-h, 28px);
   padding: 0 var(--ctl-pad, var(--s-4));
   border-radius: var(--ctl-r, var(--r-sm));
@@ -1982,6 +2001,15 @@ html[data-shell="host"] .l-app {
   flex: 1 1 auto;
   min-width: 0;
   max-width: 420px;
+}
+
+/* 宽控件槽里常放 `<Cluster><Fill><Field /></Fill><Button /></Cluster>`：
+   直接子级需要吃满槽宽并允许收缩，否则输入框会被内容/占位符压窄。 */
+.c-row__control--wide > .l-row,
+.c-row__control--wide > .c-field,
+.c-row__control--wide > .c-textarea {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 
@@ -3547,11 +3575,19 @@ html[data-focused="0"] .c-nav__item[aria-selected="true"] .c-nav__icon {
   height: var(--toolbar-h);
   padding: 0 var(--topbar-pad-r, var(--s-6)) 0 var(--topbar-pad-l, var(--s-7));
   background: transparent;
-  pointer-events: none; /* 空白处留给窗口拖动 */
+  pointer-events: auto; /* 必须接收命中，Tauri data-tauri-drag-region 才能拖窗 */
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .c-topbar > * {
   pointer-events: auto;
+}
+
+.c-topbar input,
+.c-topbar textarea {
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .c-topbar__lead {
@@ -5107,6 +5143,9 @@ html[data-focused="0"] .c-nav__item[aria-selected="true"] .c-nav__icon {
 }
 
 .c-dialog__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-4);
   min-width: 0;
   color: var(--text-glass-1, var(--text-primary));
 }
@@ -6691,6 +6730,7 @@ html[data-resizing] {
 .c-formfield__body {
   display: flex;
   flex-direction: column;
+  gap: var(--s-3);
   min-width: 0;
 }
 
@@ -9815,13 +9855,13 @@ html[data-resizing] {
     ),
     radial-gradient(
       115% 150% at 4% 50%,
-      rgb(var(--accent-rgb) / calc(0.5 * var(--lg-amount-k) * var(--rf, 1))) 0%,
-      rgb(var(--accent-rgb) / calc(0.42 * var(--lg-amount-k) * var(--rf, 1))) 38%,
-      rgb(var(--accent-rgb) / 0) 56%
+      rgb(var(--slider-fill-rgb, var(--accent-rgb)) / calc(0.5 * var(--lg-amount-k) * var(--rf, 1))) 0%,
+      rgb(var(--slider-fill-rgb, var(--accent-rgb)) / calc(0.42 * var(--lg-amount-k) * var(--rf, 1))) 38%,
+      rgb(var(--slider-fill-rgb, var(--accent-rgb)) / 0) 56%
     ),
     radial-gradient(
       130% 115% at 50% 120%,
-      rgb(var(--accent-rgb) / calc(0.5 * var(--lg-amount-k))),
+      rgb(var(--slider-fill-rgb, var(--accent-rgb)) / calc(0.5 * var(--lg-amount-k))),
       transparent 64%
     );
   backdrop-filter: blur(var(--thumb-blur-px)) saturate(calc(var(--lg-vibrancy) * 100%));
@@ -11370,129 +11410,1114 @@ html[data-resizing] {
 }
 
 @supports (backdrop-filter: url(#gd-glass-capsule-34)) {
-  :root:has(#gd-glass-capsule-34) .c-capsule--round {
+  :root:not([data-gd-effects="blur"], [data-gd-effects="solid"]):has(#gd-glass-capsule-34) .c-capsule--round:not([data-gd-solid], [data-gd-solid] *) {
     backdrop-filter: blur(calc(var(--m-popover-blur) * var(--glass-blur-k, 1))) saturate(calc(var(--lg-vibrancy) * 100%)) url(#gd-glass-capsule-34);
     /* Once the SVG takes over the optical layer, don't draw two coatings. */
     background: none !important;
     --lg-css-stroke-alpha: 0;
     --lg-css-dispersion: 0;
   }
-  :root:has(#gd-glass-capsule-34) .c-capsule--round::before,
-  :root:has(#gd-glass-capsule-34) .c-capsule--round::after {
+  :root:not([data-gd-effects="blur"], [data-gd-effects="solid"]):has(#gd-glass-capsule-34) .c-capsule--round:not([data-gd-solid], [data-gd-solid] *)::before,
+  :root:not([data-gd-effects="blur"], [data-gd-effects="solid"]):has(#gd-glass-capsule-34) .c-capsule--round:not([data-gd-solid], [data-gd-solid] *)::after {
     opacity: 0 !important;
   }
 
-  :root:has(#gd-glass-capsule-112) .c-capsule[data-size="112"] {
+  :root:not([data-gd-effects="blur"], [data-gd-effects="solid"]):has(#gd-glass-capsule-112) .c-capsule[data-size="112"]:not([data-gd-solid], [data-gd-solid] *) {
     backdrop-filter: blur(calc(var(--m-popover-blur) * var(--glass-blur-k, 1))) saturate(calc(var(--lg-vibrancy) * 100%)) url(#gd-glass-capsule-112);
     /* Once the SVG takes over the optical layer, don't draw two coatings. */
     background: none !important;
     --lg-css-stroke-alpha: 0;
     --lg-css-dispersion: 0;
   }
-  :root:has(#gd-glass-capsule-112) .c-capsule[data-size="112"]::before,
-  :root:has(#gd-glass-capsule-112) .c-capsule[data-size="112"]::after {
+  :root:not([data-gd-effects="blur"], [data-gd-effects="solid"]):has(#gd-glass-capsule-112) .c-capsule[data-size="112"]:not([data-gd-solid], [data-gd-solid] *)::before,
+  :root:not([data-gd-effects="blur"], [data-gd-effects="solid"]):has(#gd-glass-capsule-112) .c-capsule[data-size="112"]:not([data-gd-solid], [data-gd-solid] *)::after {
     opacity: 0 !important;
   }
 
-  :root:has(#gd-glass-capsule-180) .c-capsule[data-size="180"] {
+  :root:not([data-gd-effects="blur"], [data-gd-effects="solid"]):has(#gd-glass-capsule-180) .c-capsule[data-size="180"]:not([data-gd-solid], [data-gd-solid] *) {
     backdrop-filter: blur(calc(var(--m-popover-blur) * var(--glass-blur-k, 1))) saturate(calc(var(--lg-vibrancy) * 100%)) url(#gd-glass-capsule-180);
     /* Once the SVG takes over the optical layer, don't draw two coatings. */
     background: none !important;
     --lg-css-stroke-alpha: 0;
     --lg-css-dispersion: 0;
   }
-  :root:has(#gd-glass-capsule-180) .c-capsule[data-size="180"]::before,
-  :root:has(#gd-glass-capsule-180) .c-capsule[data-size="180"]::after {
+  :root:not([data-gd-effects="blur"], [data-gd-effects="solid"]):has(#gd-glass-capsule-180) .c-capsule[data-size="180"]:not([data-gd-solid], [data-gd-solid] *)::before,
+  :root:not([data-gd-effects="blur"], [data-gd-effects="solid"]):has(#gd-glass-capsule-180) .c-capsule[data-size="180"]:not([data-gd-solid], [data-gd-solid] *)::after {
     opacity: 0 !important;
   }
 
-  :root:has(#gd-glass-thumb) .c-slider__thumb {
+  :root:not([data-gd-effects="blur"], [data-gd-effects="solid"]):has(#gd-glass-thumb) .c-slider__thumb:not([data-gd-solid], [data-gd-solid] *) {
     backdrop-filter: blur(calc(var(--thumb-blur-px) * var(--glass-blur-k, 1))) saturate(calc(var(--lg-vibrancy) * 100%)) url(#gd-glass-thumb);
   }
 
-  :root:has(#gd-glass-panel-320x220) .c-glass-panel[data-glass="panel-320x220"] {
+  :root:not([data-gd-effects="blur"], [data-gd-effects="solid"]):has(#gd-glass-panel-320x220) .c-glass-panel[data-glass="panel-320x220"]:not([data-gd-solid], [data-gd-solid] *) {
     backdrop-filter: blur(calc(var(--m-panel-blur) * var(--glass-blur-k, 1))) saturate(calc(var(--lg-vibrancy) * 100%)) url(#gd-glass-panel-320x220);
     /* Once the SVG takes over the optical layer, don't draw two coatings. */
     background: none !important;
     --lg-css-stroke-alpha: 0;
     --lg-css-dispersion: 0;
   }
-  :root:has(#gd-glass-panel-320x220) .c-glass-panel[data-glass="panel-320x220"]::before,
-  :root:has(#gd-glass-panel-320x220) .c-glass-panel[data-glass="panel-320x220"]::after {
+  :root:not([data-gd-effects="blur"], [data-gd-effects="solid"]):has(#gd-glass-panel-320x220) .c-glass-panel[data-glass="panel-320x220"]:not([data-gd-solid], [data-gd-solid] *)::before,
+  :root:not([data-gd-effects="blur"], [data-gd-effects="solid"]):has(#gd-glass-panel-320x220) .c-glass-panel[data-glass="panel-320x220"]:not([data-gd-solid], [data-gd-solid] *)::after {
     opacity: 0 !important;
   }
 
-  :root:has(#gd-glass-panel-480x320) .c-glass-panel[data-glass="panel-480x320"] {
+  :root:not([data-gd-effects="blur"], [data-gd-effects="solid"]):has(#gd-glass-panel-480x320) .c-glass-panel[data-glass="panel-480x320"]:not([data-gd-solid], [data-gd-solid] *) {
     backdrop-filter: blur(calc(var(--m-panel-blur) * var(--glass-blur-k, 1))) saturate(calc(var(--lg-vibrancy) * 100%)) url(#gd-glass-panel-480x320);
     /* Once the SVG takes over the optical layer, don't draw two coatings. */
     background: none !important;
     --lg-css-stroke-alpha: 0;
     --lg-css-dispersion: 0;
   }
-  :root:has(#gd-glass-panel-480x320) .c-glass-panel[data-glass="panel-480x320"]::before,
-  :root:has(#gd-glass-panel-480x320) .c-glass-panel[data-glass="panel-480x320"]::after {
+  :root:not([data-gd-effects="blur"], [data-gd-effects="solid"]):has(#gd-glass-panel-480x320) .c-glass-panel[data-glass="panel-480x320"]:not([data-gd-solid], [data-gd-solid] *)::before,
+  :root:not([data-gd-effects="blur"], [data-gd-effects="solid"]):has(#gd-glass-panel-480x320) .c-glass-panel[data-glass="panel-480x320"]:not([data-gd-solid], [data-gd-solid] *)::after {
     opacity: 0 !important;
   }
 
-  :root:has(#gd-glass-panel-640x420) .c-glass-panel[data-glass="panel-640x420"] {
+  :root:not([data-gd-effects="blur"], [data-gd-effects="solid"]):has(#gd-glass-panel-640x420) .c-glass-panel[data-glass="panel-640x420"]:not([data-gd-solid], [data-gd-solid] *) {
     backdrop-filter: blur(calc(var(--m-panel-blur) * var(--glass-blur-k, 1))) saturate(calc(var(--lg-vibrancy) * 100%)) url(#gd-glass-panel-640x420);
     /* Once the SVG takes over the optical layer, don't draw two coatings. */
     background: none !important;
     --lg-css-stroke-alpha: 0;
     --lg-css-dispersion: 0;
   }
-  :root:has(#gd-glass-panel-640x420) .c-glass-panel[data-glass="panel-640x420"]::before,
-  :root:has(#gd-glass-panel-640x420) .c-glass-panel[data-glass="panel-640x420"]::after {
+  :root:not([data-gd-effects="blur"], [data-gd-effects="solid"]):has(#gd-glass-panel-640x420) .c-glass-panel[data-glass="panel-640x420"]:not([data-gd-solid], [data-gd-solid] *)::before,
+  :root:not([data-gd-effects="blur"], [data-gd-effects="solid"]):has(#gd-glass-panel-640x420) .c-glass-panel[data-glass="panel-640x420"]:not([data-gd-solid], [data-gd-solid] *)::after {
     opacity: 0 !important;
   }
 
-  :root:has(#gd-glass-menu-240x200) .c-menu[data-glass="menu-240x200"] {
+  :root:not([data-gd-effects="blur"], [data-gd-effects="solid"]):has(#gd-glass-menu-240x200) .c-menu[data-glass="menu-240x200"]:not([data-gd-solid], [data-gd-solid] *) {
     backdrop-filter: blur(calc(var(--m-popover-blur) * var(--glass-blur-k, 1))) saturate(calc(var(--lg-vibrancy) * 100%)) url(#gd-glass-menu-240x200);
     /* Once the SVG takes over the optical layer, don't draw two coatings. */
     background: none !important;
     --lg-css-stroke-alpha: 0;
     --lg-css-dispersion: 0;
   }
-  :root:has(#gd-glass-menu-240x200) .c-menu[data-glass="menu-240x200"]::before,
-  :root:has(#gd-glass-menu-240x200) .c-menu[data-glass="menu-240x200"]::after {
+  :root:not([data-gd-effects="blur"], [data-gd-effects="solid"]):has(#gd-glass-menu-240x200) .c-menu[data-glass="menu-240x200"]:not([data-gd-solid], [data-gd-solid] *)::before,
+  :root:not([data-gd-effects="blur"], [data-gd-effects="solid"]):has(#gd-glass-menu-240x200) .c-menu[data-glass="menu-240x200"]:not([data-gd-solid], [data-gd-solid] *)::after {
     opacity: 0 !important;
   }
 
-  :root:has(#gd-glass-menu-240x280) .c-menu[data-glass="menu-240x280"] {
+  :root:not([data-gd-effects="blur"], [data-gd-effects="solid"]):has(#gd-glass-menu-240x280) .c-menu[data-glass="menu-240x280"]:not([data-gd-solid], [data-gd-solid] *) {
     backdrop-filter: blur(calc(var(--m-popover-blur) * var(--glass-blur-k, 1))) saturate(calc(var(--lg-vibrancy) * 100%)) url(#gd-glass-menu-240x280);
     /* Once the SVG takes over the optical layer, don't draw two coatings. */
     background: none !important;
     --lg-css-stroke-alpha: 0;
     --lg-css-dispersion: 0;
   }
-  :root:has(#gd-glass-menu-240x280) .c-menu[data-glass="menu-240x280"]::before,
-  :root:has(#gd-glass-menu-240x280) .c-menu[data-glass="menu-240x280"]::after {
+  :root:not([data-gd-effects="blur"], [data-gd-effects="solid"]):has(#gd-glass-menu-240x280) .c-menu[data-glass="menu-240x280"]:not([data-gd-solid], [data-gd-solid] *)::before,
+  :root:not([data-gd-effects="blur"], [data-gd-effects="solid"]):has(#gd-glass-menu-240x280) .c-menu[data-glass="menu-240x280"]:not([data-gd-solid], [data-gd-solid] *)::after {
     opacity: 0 !important;
   }
 
-  :root:has(#gd-glass-sheet-520x360) .c-sheet[data-glass="sheet-520x360"] {
+  :root:not([data-gd-effects="blur"], [data-gd-effects="solid"]):has(#gd-glass-sheet-520x360) .c-sheet[data-glass="sheet-520x360"]:not([data-gd-solid], [data-gd-solid] *) {
     backdrop-filter: blur(calc(var(--m-sheet-blur) * var(--glass-blur-k, 1))) saturate(calc(var(--lg-vibrancy) * 100%)) url(#gd-glass-sheet-520x360);
     /* Once the SVG takes over the optical layer, don't draw two coatings. */
     background: none !important;
     --lg-css-stroke-alpha: 0;
     --lg-css-dispersion: 0;
   }
-  :root:has(#gd-glass-sheet-520x360) .c-sheet[data-glass="sheet-520x360"]::before,
-  :root:has(#gd-glass-sheet-520x360) .c-sheet[data-glass="sheet-520x360"]::after {
+  :root:not([data-gd-effects="blur"], [data-gd-effects="solid"]):has(#gd-glass-sheet-520x360) .c-sheet[data-glass="sheet-520x360"]:not([data-gd-solid], [data-gd-solid] *)::before,
+  :root:not([data-gd-effects="blur"], [data-gd-effects="solid"]):has(#gd-glass-sheet-520x360) .c-sheet[data-glass="sheet-520x360"]:not([data-gd-solid], [data-gd-solid] *)::after {
     opacity: 0 !important;
   }
 
-  :root:has(#gd-glass-toast-320x34) .c-toast[data-glass="toast-320x34"] {
+  :root:not([data-gd-effects="blur"], [data-gd-effects="solid"]):has(#gd-glass-toast-320x34) .c-toast[data-glass="toast-320x34"]:not([data-gd-solid], [data-gd-solid] *) {
     backdrop-filter: blur(calc(calc(10px + 26px * var(--lg)) * var(--glass-blur-k, 0.9))) saturate(calc(var(--lg-vibrancy) * 100%)) url(#gd-glass-toast-320x34);
     /* Once the SVG takes over the optical layer, don't draw two coatings. */
     background: none !important;
     --lg-css-stroke-alpha: 0;
     --lg-css-dispersion: 0;
   }
-  :root:has(#gd-glass-toast-320x34) .c-toast[data-glass="toast-320x34"]::before,
-  :root:has(#gd-glass-toast-320x34) .c-toast[data-glass="toast-320x34"]::after {
+  :root:not([data-gd-effects="blur"], [data-gd-effects="solid"]):has(#gd-glass-toast-320x34) .c-toast[data-glass="toast-320x34"]:not([data-gd-solid], [data-gd-solid] *)::before,
+  :root:not([data-gd-effects="blur"], [data-gd-effects="solid"]):has(#gd-glass-toast-320x34) .c-toast[data-glass="toast-320x34"]:not([data-gd-solid], [data-gd-solid] *)::after {
     opacity: 0 !important;
   }
+}
+
+
+/* ===== components/64-media.css ===== */
+/* ==========================================================================
+   64. 媒体与音乐播放器组件（CoverArt / AudioSpectrum / TrackList / LyricView / PlayerBar）
+   —— 全部消费 tokens.css 变量，自动适配浅色与深色主题。
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   CoverArt · 专辑/曲目封面
+   -------------------------------------------------------------------------- */
+
+.c-cover {
+  position: relative;
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: var(--cover-size, 56px);
+  height: var(--cover-size, 56px);
+  border-radius: var(--cover-r, var(--r-md));
+  overflow: hidden;
+  background: var(--surface-well);
+  box-shadow: var(--shadow-card);
+  user-select: none;
+  -webkit-user-select: none;
+  transition:
+    border-radius var(--dur-2) var(--ease-out),
+    box-shadow var(--dur-2) var(--ease-out),
+    transform var(--dur-2) var(--ease-out);
+}
+
+.c-cover--xs {
+  --cover-size: 32px;
+  --cover-r: var(--r-xs);
+}
+
+.c-cover--sm {
+  --cover-size: 40px;
+  --cover-r: var(--r-xs);
+}
+
+.c-cover--md {
+  --cover-size: 56px;
+  --cover-r: var(--r-sm);
+}
+
+.c-cover--lg {
+  --cover-size: 120px;
+  --cover-r: var(--r-lg);
+}
+
+.c-cover--hero {
+  --cover-size: 220px;
+  --cover-r: var(--r-xl);
+  box-shadow: var(--shadow-popover);
+}
+
+.c-cover__img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0;
+  transition: opacity var(--dur-3) var(--ease-out);
+}
+
+.c-cover__img[data-loaded="1"] {
+  opacity: 1;
+}
+
+.c-cover__placeholder {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  color: var(--text-tertiary);
+  background:
+    radial-gradient(90% 90% at 25% 20%, var(--accent-soft), transparent 72%),
+    var(--surface-well);
+  box-shadow: inset 0 0 0 0.5px var(--line);
+}
+
+/* 黑胶唱片旋转模式 */
+.c-cover[data-spinning="true"] {
+  border-radius: var(--r-pill);
+  box-shadow:
+    0 0 0 2px var(--line-strong),
+    var(--shadow-card-hover);
+}
+
+.c-cover[data-spinning="true"] .c-cover__img,
+.c-cover[data-spinning="true"] .c-cover__placeholder {
+  animation: gd-cover-spin 18s linear infinite;
+}
+
+.c-cover__spindle {
+  position: absolute;
+  width: 20%;
+  height: 20%;
+  min-width: 8px;
+  min-height: 8px;
+  border-radius: var(--r-pill);
+  background: var(--surface-window);
+  box-shadow:
+    0 0 0 2px var(--line-strong),
+    inset 0 1px 2px rgb(0 0 0 / calc(0.2 * var(--shadow-k)));
+  pointer-events: none;
+  z-index: 2;
+}
+
+/* 封面右下角正在播放迷你均衡器指示 */
+.c-cover__eq {
+  position: absolute;
+  right: var(--s-2);
+  bottom: var(--s-2);
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 14px;
+  padding: 3px 4px;
+  border-radius: var(--r-xs);
+  background: rgb(0 0 0 / 0.56);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.c-cover[data-spinning="true"] .c-cover__eq {
+  display: none;
+}
+
+.c-cover__eq span {
+  width: 2px;
+  height: 100%;
+  border-radius: var(--r-pill);
+  background: var(--text-on-accent);
+  transform-origin: bottom center;
+  animation: gd-eq-bounce 0.82s var(--ease-in-out) infinite alternate;
+}
+
+.c-cover__eq span:nth-child(2) {
+  animation-delay: -0.28s;
+}
+
+.c-cover__eq span:nth-child(3) {
+  animation-delay: -0.56s;
+}
+
+/* 悬停播放按钮遮罩 */
+.c-cover__play {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgb(0 0 0 / 0.36);
+  color: var(--text-on-accent);
+  opacity: 0;
+  transition: opacity var(--dur-1) var(--ease-out);
+  z-index: 3;
+}
+
+.c-cover__play .ic {
+  filter: drop-shadow(0 1px 4px rgb(0 0 0 / 0.45));
+  transition: transform var(--dur-1) var(--ease-out);
+}
+
+.c-cover--interactive:hover .c-cover__play,
+.c-cover--interactive:focus-within .c-cover__play {
+  opacity: 1;
+}
+
+.c-cover__play:hover .ic {
+  transform: scale(1.1);
+}
+
+.c-cover__play:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: -2px;
+}
+
+@keyframes gd-cover-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* --------------------------------------------------------------------------
+   AudioSpectrum · 实时音频频谱
+   -------------------------------------------------------------------------- */
+
+.c-spectrum {
+  --spectrum-h: 28px;
+  --spectrum-gap: 3px;
+  --spectrum-bar-min: 2px;
+  --spectrum-bar-max: 5px;
+  display: inline-flex;
+  align-items: flex-end;
+  gap: var(--spectrum-gap);
+  height: var(--spectrum-h);
+  min-width: 48px;
+  padding: var(--s-1) 0;
+  opacity: 0.4;
+  transition: opacity var(--dur-2) var(--ease-out);
+}
+
+.c-spectrum[data-active="true"] {
+  opacity: 1;
+}
+
+.c-spectrum--compact {
+  --spectrum-h: 18px;
+  --spectrum-gap: 2px;
+  --spectrum-bar-min: 2px;
+  --spectrum-bar-max: 3px;
+  min-width: 36px;
+}
+
+.c-spectrum--large {
+  --spectrum-h: 56px;
+  --spectrum-gap: 4px;
+  --spectrum-bar-min: 3px;
+  --spectrum-bar-max: 7px;
+  min-width: 120px;
+}
+
+.c-spectrum__bar {
+  flex: 1 1 0;
+  min-width: var(--spectrum-bar-min);
+  max-width: var(--spectrum-bar-max);
+  height: 100%;
+  border-radius: var(--r-pill);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--accent) 72%, #fff),
+    var(--accent)
+  );
+  transform-origin: bottom center;
+  transform: scaleY(var(--bar-level, 0.06));
+  will-change: transform;
+  transition: transform 80ms linear;
+}
+
+/* --------------------------------------------------------------------------
+   TrackList · 曲目列表
+   -------------------------------------------------------------------------- */
+
+.c-tracklist {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  container-type: inline-size;
+}
+
+.c-tracklist__rows {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.c-tracklist__row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 34px minmax(180px, 1.9fr) minmax(100px, 1fr) auto 50px;
+  align-items: center;
+  gap: var(--s-5);
+  min-height: 54px;
+  padding: var(--s-2) var(--s-5);
+  border-radius: var(--r-md);
+  color: var(--text-primary);
+  transition: background-color var(--dur-1) var(--ease-out);
+}
+
+.c-tracklist__row--interactive:hover {
+  background: var(--surface-hover);
+}
+
+.c-tracklist__row--interactive:active {
+  background: var(--surface-selection);
+}
+
+.c-tracklist__row:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: -2px;
+}
+
+.c-tracklist__row[data-active="true"] {
+  background: var(--accent-soft);
+}
+
+.c-tracklist__row[data-active="true"] .c-tracklist__title {
+  color: var(--accent);
+}
+
+.c-tracklist--selectable .c-tracklist__row {
+  grid-template-columns: 24px 34px minmax(180px, 1.9fr) minmax(100px, 1fr) auto 50px;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.c-tracklist--selectable .c-tracklist__row--interactive:hover .c-tracklist__num,
+.c-tracklist--selectable .c-tracklist__row--interactive:focus-within .c-tracklist__num {
+  opacity: 1;
+}
+
+.c-tracklist--selectable .c-tracklist__playbtn {
+  display: none;
+}
+
+.c-tracklist__check-cell {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  border-radius: var(--r-xs);
+  cursor: default;
+}
+
+.c-tracklist__check-cell:hover .c-check {
+  background: var(--surface-control-hover);
+}
+
+.c-tracklist__check-cell:hover .c-check[aria-checked="true"] {
+  background: var(--accent-hover);
+}
+
+.c-tracklist__check-cell:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 2px;
+}
+
+.c-tracklist__row[data-selected="true"] {
+  background: var(--accent-soft);
+}
+
+.c-tracklist__row[data-selected="true"]:hover {
+  background: color-mix(in srgb, var(--accent) 18%, var(--surface-hover));
+}
+
+.c-tracklist__leading {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  justify-self: center;
+}
+
+.c-tracklist__num {
+  font-size: var(--fs-12);
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: var(--tracking-caption);
+  transition: opacity var(--dur-1) var(--ease-out);
+}
+
+.c-tracklist__row[data-active="true"] .c-tracklist__num {
+  color: var(--accent);
+}
+
+.c-tracklist__eq {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 13px;
+}
+
+.c-tracklist__eq span {
+  width: 2.5px;
+  height: 100%;
+  border-radius: var(--r-pill);
+  background: var(--accent);
+  transform-origin: bottom center;
+  animation: gd-eq-bounce 0.78s var(--ease-in-out) infinite alternate;
+}
+
+.c-tracklist__eq span:nth-child(2) {
+  animation-delay: -0.26s;
+}
+
+.c-tracklist__eq span:nth-child(3) {
+  animation-delay: -0.52s;
+}
+
+@keyframes gd-eq-bounce {
+  0% {
+    transform: scaleY(0.24);
+  }
+  100% {
+    transform: scaleY(1);
+  }
+}
+
+.c-tracklist__playbtn {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-pill);
+  color: var(--text-primary);
+  background: var(--surface-control);
+  opacity: 0;
+  transition:
+    opacity var(--dur-1) var(--ease-out),
+    background-color var(--dur-1) var(--ease-out);
+}
+
+.c-tracklist__playbtn:hover {
+  background: var(--accent);
+  color: var(--text-on-accent);
+}
+
+.c-tracklist__row--interactive:hover .c-tracklist__num,
+.c-tracklist__row--interactive:focus-within .c-tracklist__num {
+  opacity: 0;
+}
+
+.c-tracklist__row--interactive:hover .c-tracklist__playbtn,
+.c-tracklist__row--interactive:focus-within .c-tracklist__playbtn {
+  opacity: 1;
+}
+
+.c-tracklist__main {
+  display: flex;
+  align-items: center;
+  gap: var(--s-5);
+  min-width: 0;
+}
+
+.c-tracklist__meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.c-tracklist__title-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  min-width: 0;
+}
+
+.c-tracklist__title {
+  font-size: var(--fs-13);
+  font-weight: 500;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.c-tracklist__badge {
+  flex: none;
+  height: 16px;
+  padding: 0 var(--s-2);
+}
+
+.c-tracklist__artist {
+  font-size: var(--fs-12);
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.c-tracklist__album {
+  font-size: var(--fs-12);
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.c-tracklist__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s-1);
+}
+
+.c-tracklist__action,
+.c-tracklist__like {
+  opacity: 0;
+  transition:
+    opacity var(--dur-1) var(--ease-out),
+    background-color var(--dur-1) var(--ease-out),
+    color var(--dur-1) var(--ease-out);
+}
+
+.c-tracklist__like--on {
+  opacity: 1;
+  color: var(--danger);
+}
+
+.c-tracklist__like--on:hover {
+  color: var(--danger);
+}
+
+.c-tracklist__row:hover .c-tracklist__action,
+.c-tracklist__row:hover .c-tracklist__like,
+.c-tracklist__row:focus-within .c-tracklist__action,
+.c-tracklist__row:focus-within .c-tracklist__like {
+  opacity: 1;
+}
+
+.c-tracklist__duration {
+  justify-self: end;
+  font-size: var(--fs-12);
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: var(--tracking-caption);
+}
+
+.c-tracklist__empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s-4);
+  padding: var(--s-11) var(--s-8);
+  color: var(--text-tertiary);
+  font-size: var(--fs-13);
+  text-align: center;
+}
+
+.c-tracklist__empty-icon {
+  color: var(--text-quaternary);
+  opacity: 0.75;
+}
+
+@container (max-width: 560px) {
+  .c-tracklist__row {
+    grid-template-columns: 30px minmax(140px, 1fr) auto 46px;
+    gap: var(--s-3);
+  }
+  .c-tracklist--selectable .c-tracklist__row {
+    grid-template-columns: 24px 30px minmax(140px, 1fr) auto 46px;
+  }
+  .c-tracklist__album {
+    display: none;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   LyricView · 滚动歌词视图
+   -------------------------------------------------------------------------- */
+
+.c-lyric {
+  position: relative;
+  overflow-y: auto;
+  overflow-x: hidden;
+  height: 100%;
+  min-height: 220px;
+  scrollbar-width: thin;
+  -webkit-mask-image: linear-gradient(
+    180deg,
+    transparent 0%,
+    #000 12%,
+    #000 88%,
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    180deg,
+    transparent 0%,
+    #000 12%,
+    #000 88%,
+    transparent 100%
+  );
+}
+
+.c-lyric__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-5);
+  padding: 36% var(--s-6);
+}
+
+.c-lyric__line {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-5);
+  padding: var(--s-4) var(--s-6);
+  border-radius: var(--r-md);
+  transform-origin: left center;
+  transition:
+    opacity var(--dur-3) var(--ease-out),
+    background-color var(--dur-1) var(--ease-out),
+    transform var(--dur-3) var(--ease-out);
+}
+
+.c-lyric--seekable .c-lyric__line {
+  cursor: pointer;
+}
+
+.c-lyric--seekable .c-lyric__line:hover {
+  background: var(--surface-hover);
+  opacity: 0.95;
+}
+
+.c-lyric__line:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: -2px;
+}
+
+.c-lyric__time {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: var(--fs-11);
+  color: var(--text-quaternary);
+  font-variant-numeric: tabular-nums;
+  opacity: 0;
+  transition:
+    opacity var(--dur-1) var(--ease-out),
+    color var(--dur-2) var(--ease-out);
+}
+
+.c-lyric--seekable .c-lyric__line:hover .c-lyric__time,
+.c-lyric__line[data-state="active"] .c-lyric__time {
+  opacity: 1;
+}
+
+.c-lyric__line[data-state="active"] .c-lyric__time {
+  color: var(--accent);
+}
+
+.c-lyric__content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.c-lyric__text {
+  font-family: var(--font-display);
+  font-size: var(--fs-17);
+  font-weight: 500;
+  line-height: var(--lh-snug);
+  letter-spacing: var(--tracking-title);
+  color: var(--text-secondary);
+  transition:
+    color var(--dur-2) var(--ease-out),
+    font-size var(--dur-2) var(--ease-out);
+}
+
+.c-lyric__trans {
+  font-size: var(--fs-13);
+  line-height: var(--lh-base);
+  color: var(--text-tertiary);
+}
+
+.c-lyric__line[data-state="past"] {
+  opacity: 0.45;
+}
+
+.c-lyric__line[data-state="future"] {
+  opacity: 0.68;
+}
+
+.c-lyric__line[data-state="active"] {
+  opacity: 1;
+  background: var(--surface-well);
+}
+
+.c-lyric__line[data-state="active"] .c-lyric__text {
+  font-size: var(--fs-22);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.c-lyric__line[data-state="active"] .c-lyric__trans {
+  font-size: var(--fs-15);
+  color: var(--text-secondary);
+}
+
+.c-lyric__empty {
+  height: 100%;
+  min-height: 200px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s-4);
+  color: var(--text-tertiary);
+  font-size: var(--fs-13);
+}
+
+.c-lyric__empty-icon {
+  color: var(--text-quaternary);
+  opacity: 0.75;
+}
+
+/* --------------------------------------------------------------------------
+   PlayerBar · 浮动液态玻璃底部播控栏
+   -------------------------------------------------------------------------- */
+
+.c-playerbar {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.05fr) minmax(260px, 1.55fr) minmax(180px, 1.05fr);
+  align-items: center;
+  gap: var(--s-7);
+  width: 100%;
+  min-height: 74px;
+  padding: var(--s-4) var(--s-7);
+  border-radius: var(--r-xl);
+  box-shadow:
+    var(--shadow-popover),
+    inset 0 0 0 0.5px rgb(255 255 255 / calc(0.42 * var(--lg-css-stroke-alpha, var(--lg-stroke-alpha)))),
+    inset 0 0.5px 0 rgb(255 255 255 / calc(0.65 * var(--lg-css-stroke-alpha, var(--lg-stroke-alpha)))),
+    inset 0 -0.5px 0 rgb(255 255 255 / calc(0.55 * var(--lg-css-stroke-alpha, var(--lg-stroke-alpha)) * var(--hl-bottom)));
+}
+
+.c-playerbar__left {
+  display: flex;
+  align-items: center;
+  gap: var(--s-4);
+  min-width: 0;
+}
+
+.c-playerbar__trackbtn {
+  display: flex;
+  align-items: center;
+  gap: var(--s-5);
+  min-width: 0;
+  flex: 1;
+  padding: var(--s-1);
+  border-radius: var(--r-md);
+  text-align: left;
+  transition: background-color var(--dur-1) var(--ease-out);
+}
+
+.c-playerbar__trackbtn:not([disabled]):hover {
+  background: var(--surface-hover);
+}
+
+.c-playerbar__trackbtn:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 1px;
+}
+
+.c-playerbar__meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.c-playerbar__title-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  min-width: 0;
+}
+
+.c-playerbar__title {
+  font-size: var(--fs-13);
+  font-weight: 600;
+  color: var(--text-glass-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.c-playerbar__title--idle {
+  font-weight: 500;
+  color: var(--text-glass-3);
+}
+
+.c-playerbar__source {
+  flex: none;
+  height: 16px;
+  padding: 0 var(--s-2);
+}
+
+.c-playerbar__artist {
+  font-size: var(--fs-12);
+  color: var(--text-glass-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.c-playerbar__like {
+  flex: none;
+}
+
+.c-playerbar__like--on {
+  color: var(--danger);
+}
+
+.c-playerbar__like--on:hover {
+  color: var(--danger);
+}
+
+.c-playerbar__center {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s-2);
+  min-width: 0;
+}
+
+.c-playerbar__controls {
+  display: flex;
+  align-items: center;
+  gap: var(--s-4);
+}
+
+.c-playerbar__playbtn {
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: var(--r-pill);
+  background: var(--accent);
+  color: var(--text-on-accent);
+  box-shadow: 0 2px 8px -2px color-mix(in srgb, var(--accent) 55%, transparent);
+  transform: translateZ(0);
+  will-change: transform;
+  transition:
+    background-color var(--dur-1) var(--ease-out),
+    transform var(--dur-1) var(--ease-out);
+}
+
+.c-playerbar__playbtn:hover:not([disabled]) {
+  background: var(--accent-hover);
+  transform: scale(1.05);
+}
+
+.c-playerbar__playbtn:active:not([disabled]) {
+  transform: scale(0.95);
+}
+
+.c-playerbar__playbtn[disabled] {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.c-playerbar__playbtn .c-spinner {
+  border-color: rgb(255 255 255 / 0.35);
+  border-top-color: var(--text-on-accent);
+}
+
+.c-playerbar__progress {
+  display: flex;
+  align-items: center;
+  gap: var(--s-4);
+  width: 100%;
+  max-width: 460px;
+}
+
+.c-playerbar__time {
+  flex: none;
+  min-width: 36px;
+  font-size: var(--fs-11);
+  color: var(--text-glass-3);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: var(--tracking-caption);
+  text-align: center;
+}
+
+.c-playerbar__seek {
+  flex: 1;
+  min-width: 0;
+}
+
+.c-playerbar__seek .c-slider,
+.c-playerbar__vol-slider .c-slider {
+  height: 20px;
+  --thumb-scale: 0.75;
+}
+
+.c-playerbar__seek .c-slider__track,
+.c-playerbar__vol-slider .c-slider__track {
+  height: 5px;
+}
+
+.c-playerbar__right {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--s-3);
+  min-width: 0;
+}
+
+.c-playerbar__quality {
+  flex: none;
+  height: 20px;
+  padding: 0 var(--s-3);
+  border-radius: var(--r-pill);
+  font-size: var(--fs-11);
+  font-weight: 600;
+  letter-spacing: var(--tracking-caption);
+  color: var(--accent);
+  background: var(--accent-soft);
+  transition: background-color var(--dur-1) var(--ease-out);
+}
+
+.c-playerbar__quality:hover {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.c-playerbar__volume {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.c-playerbar__vol-slider {
+  width: 80px;
+}
+
+@media (max-width: 780px) {
+  .c-playerbar {
+    grid-template-columns: minmax(140px, 1fr) minmax(200px, 1.4fr) auto;
+    gap: var(--s-4);
+    padding: var(--s-3) var(--s-5);
+  }
+  .c-playerbar__spectrum,
+  .c-playerbar__vol-slider {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .c-cover[data-spinning="true"] .c-cover__img,
+  .c-cover[data-spinning="true"] .c-cover__placeholder,
+  .c-cover__eq span,
+  .c-tracklist__eq span {
+    animation: none;
+  }
+  .c-spectrum__bar,
+  .c-lyric__line {
+    transition: none;
+  }
+}
+
+
+/* ===== components/65-glass-effects-setting.css ===== */
+/* ==========================================================================
+   65. 玻璃效果设置项（GlassEffectsSetting）
+   —— 原生 <select>：不依赖浮层栈，放在任何页面上下文都能渲染
+   ========================================================================== */
+
+.c-glass-effects-setting {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-4);
+  color: var(--text-primary);
+}
+
+.c-glass-effects-setting__label {
+  font-size: var(--fs-13);
+}
+
+.c-glass-effects-setting__select {
+  box-sizing: border-box;
+  min-height: 28px;
+  max-width: 100%;
+  padding: 0 var(--s-4);
+  color: inherit;
+  font: inherit;
+  font-size: var(--fs-12);
+  background: var(--surface-control);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  transition: background-color var(--dur-1) var(--ease-out);
+}
+
+.c-glass-effects-setting__select:hover {
+  background: var(--surface-control-hover);
+}
+
+.c-glass-effects-setting__select:focus-visible {
+  outline: 3px solid var(--accent-ring);
+  outline-offset: 1px;
 }
 
 
@@ -11674,5 +12699,64 @@ html[data-resizing] {
   --lg-sheen: 0.1;
   --lg-sheen-depth: 7;
   --glass-blur-k: 1;
+}
+
+
+/* ===== effects.css ===== */
+/* ==========================================================================
+   玻璃效果兜底（必须排在 optics 之后）
+   --------------------------------------------------------------------------
+   四个触发源，效果只会更弱，不会更强：
+   1. 用户在设置项选了「性能优先」→ <html data-gd-effects="solid">
+   2. 局部退出玻璃 → [data-gd-solid]（Portal 不继承祖先属性，需要时设在浮层节点上）
+   3. 系统「减少透明度」
+   4. 引擎不支持 backdrop-filter
+   前三条共用同一份不透明表面；第 4 条不写 !important，允许后续覆写。
+   ========================================================================== */
+
+:is([data-gd-solid], [data-gd-solid] *, :root[data-gd-effects="solid"] *):is(.c-glass-chrome, .c-glass-panel, .c-capsule, .c-dock__pill, .c-menu, .c-toast, .c-glass-sheet, .c-toolbar, .c-slider__thumb, .c-rangeslider__thumb, .c-cover__eq) {
+  background: var(--surface-elevated) !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+
+:is([data-gd-solid], [data-gd-solid] *, :root[data-gd-effects="solid"] *):is(.c-topveil)::before,
+:is([data-gd-solid], [data-gd-solid] *, :root[data-gd-effects="solid"] *):is(.c-topveil)::after {
+  display: none;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+/* 封面上那排跳动柱靠后景模糊保证白色可见；没有后景处理时换成黑底。 */
+:is([data-gd-solid], [data-gd-solid] *, :root[data-gd-effects="solid"] *).c-cover__eq {
+  background: #000 !important;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  :is(.c-glass-chrome, .c-glass-panel, .c-capsule, .c-dock__pill, .c-menu, .c-toast, .c-glass-sheet, .c-toolbar, .c-slider__thumb, .c-rangeslider__thumb, .c-cover__eq) {
+    background: var(--surface-elevated) !important;
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+  }
+  .c-topveil::before,
+  .c-topveil::after {
+    display: none;
+  }
+  .c-cover__eq {
+    background: #000 !important;
+  }
+}
+
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  :is(.c-glass-chrome, .c-glass-panel, .c-capsule, .c-dock__pill, .c-menu, .c-toast, .c-glass-sheet, .c-toolbar, .c-slider__thumb, .c-rangeslider__thumb, .c-cover__eq) {
+    background: var(--surface-elevated);
+  }
+  .c-topveil::before,
+  .c-topveil::after {
+    display: none;
+  }
+  .c-cover__eq {
+    background: #000;
+  }
 }
 

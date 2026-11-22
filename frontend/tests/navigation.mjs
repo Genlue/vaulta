@@ -64,11 +64,18 @@ const state = `(() => {
 })()`;
 const near = (actual, expected) => assert.ok(Math.abs(actual - expected) < .75, `Expected ${actual} near ${expected}`);
 const waitFor = expression => retry(() => get(expression), expression);
-const switchMode = value => get(`(() => {
-  const select = document.querySelector('select[data-setting=nav]');
-  select.value = ${JSON.stringify(value)};
-  select.dispatchEvent(new Event('change', { bubbles: true }));
-})()`);
+const navModeTrigger = '.c-select .c-btn[aria-label="导航栏形态"]';
+// The setting is a GlassDesign Select: open its menu, then pick the labelled row.
+const switchMode = async value => {
+  const label = { rail: '侧边栏', dock: '悬浮导航栏' }[value];
+  await get(`document.querySelector('${navModeTrigger}').click()`);
+  await retry(() => get(`(() => {
+    const item = [...document.querySelectorAll('.c-menu .c-menu__item')].find(node => node.textContent.trim() === ${JSON.stringify(label)});
+    if (!item) return false;
+    item.click();
+    return true;
+  })()`), `nav mode option ${label}`);
+};
 
 try {
   const url = await retry(async () => {
@@ -136,7 +143,7 @@ try {
   near(resized.rightGap, 16);
 
   await get(`document.querySelector('#rail [data-act=nav][data-value=settings]').click()`);
-  await waitFor(`!!document.querySelector('select[data-setting=nav]')`);
+  await waitFor(`!!document.querySelector('${navModeTrigger}')`);
   await switchMode('dock');
   await waitFor(`${state}.pad > 0`);
   const dockOpen = await get(state);

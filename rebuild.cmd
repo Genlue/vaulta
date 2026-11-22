@@ -1,9 +1,9 @@
 @echo off
-rem One-click rebuild for vaulta. Double-click it, or run it from a terminal:
+rem One-click rebuild for Vaulta. Double-click it, or run it from a terminal:
 rem   rebuild.cmd              build and bump the patch version
 rem   rebuild.cmd -NoBump      rebuild the current version in place
 rem   rebuild.cmd -Test        run the frontend smoke test first
-rem   rebuild.cmd -SyncGlass   refresh GlassDesign assets first
+rem   rebuild.cmd -SyncGlass   refresh the pinned GlassDesign assets first
 rem
 rem This file is ASCII-only on purpose: cmd parses a .cmd with the active code
 rem page, so non-ASCII text here would break on Chinese Windows (cp936).

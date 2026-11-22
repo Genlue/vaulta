@@ -107,6 +107,9 @@ function preload() {
         case 'remove_vault': data.delete(args.vaultId); return;
         case 'snapshot': if (!s) throw '仓库不存在'; return structuredClone(s);
         case 'preview': if (a.id === 'a' && fixture.slideMode) return {kind:'slides'}; if (a.id === 'doc') return {kind:'office'}; if (a.id === 'pdf') return {kind:'pdf'}; return revisions.get(a.id) || { kind:'text', text:'# 设计构想\n\n预览 **测试**', revision:'r1' };
+        // A real thumbnail is a data URL; the fixture uses a small gradient so
+        // the grid's object-fit and has-image state can be asserted visually.
+        case 'thumbnail': return 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNDAiIGhlaWdodD0iMTgwIj48ZGVmcz48bGluZWFyR3JhZGllbnQgaWQ9ImciIHgxPSIwIiB5MT0iMCIgeDI9IjEiIHkyPSIxIj48c3RvcCBvZmZzZXQ9IjAiIHN0b3AtY29sb3I9IiM2MzcyZTgiLz48c3RvcCBvZmZzZXQ9IjEiIHN0b3AtY29sb3I9IiNjZGQ0ZmYiLz48L2xpbmVhckdyYWRpZW50PjwvZGVmcz48cmVjdCB3aWR0aD0iMjQwIiBoZWlnaHQ9IjE4MCIgZmlsbD0idXJsKCNnKSIvPjxjaXJjbGUgY3g9IjEyMCIgY3k9IjkwIiByPSI0MiIgZmlsbD0iI2ZmZmZmZiIgZmlsbC1vcGFjaXR5PSIwLjM1Ii8+PC9zdmc+';
         case 'office_preview_layout': return null;
         case 'office_preview_open': {
           if (fixture.noOffice) throw new Error('缺少预览器 <script>不会执行</script>');
@@ -270,6 +273,21 @@ try {
   await click(`[data-act=tree-toggle][data-value="设计"]`);
   await wait(`document.querySelector('#items').textContent.includes('封面.png')`);
   assert.equal(await get(`(()=>{const r=[...document.querySelectorAll('.asset-row')].find(n=>n.textContent.includes('封面.png'));return r?.querySelector('.row-asset').style.getPropertyValue('--tree-depth')})()`), '1');
+  // Grid cards show the raster itself instead of only a type glyph.
+  await click(segment('layout','grid'));
+  await wait(exists('.tile-art.has-image .tile-thumb[src]'));
+  assert.ok(await get(`fixture.calls.some(([c,p]) => c === 'thumbnail' && p.assetId === 'b')`));
+  assert.ok(await get(`!fixture.calls.some(([c,p]) => c === 'thumbnail' && p.assetId === 'd')`));
+  assert.ok(await get(`getComputedStyle(document.querySelector('.tile-thumb')).objectFit === 'cover'`));
+  assert.ok(await get(`(() => { const h = [...document.querySelectorAll('.tile')].map(t => t.getBoundingClientRect().height); return Math.max(...h) - Math.min(...h) <= 1; })()`));
+  await shot('04c-grid-thumbnails');
+  // Re-entering the grid rebuilds #stage; the thumbnail observer must rebind
+  // and cached pixels should paint without a second IPC call.
+  const thumbCalls = await get(`fixture.calls.filter(([c]) => c === 'thumbnail').length`);
+  await click(segment('layout','list')); await wait(exists('.asset-row.is-folder'));
+  await click(segment('layout','grid')); await wait(exists('.tile-art.has-image .tile-thumb[src]'));
+  assert.equal(await get(`fixture.calls.filter(([c]) => c === 'thumbnail').length`), thumbCalls);
+  await click(segment('layout','list')); await wait(exists('.asset-row.is-folder'));
   await click(`[data-act=tree-toggle][data-value="设计"]`);
   await wait(`!document.querySelector('#items').textContent.includes('封面.png')`);
   await click('[data-act=tree-all]');
@@ -311,15 +329,24 @@ try {
   assert.ok(await get(`document.querySelector('#status').textContent.includes('整体单元')`));
   assert.ok(await get(`document.querySelector('.breadcrumbs').textContent.includes('设计素材')`));
   assert.ok(await get(`document.querySelector('.breadcrumbs').textContent.includes('短片项目')`));
-  await click(action('nav','settings')); await wait(exists('select[data-setting=agent]')); await set('select[data-setting=agent]','read'); await wait(text('允许外部工具访问')); await submit(); await close();
+  await click(action('nav','settings')); await wait(exists('.c-select button[aria-label="外部工具访问"]'));
+  // readAccess renders once when the value lands and once more in its finally;
+  // wait for that second pass so the menu is not closed by a remount.
+  await pause(400);
+  await click('.c-select button[aria-label="外部工具访问"]'); await clickText('.c-menu[data-state=open] .c-menu__item', '只读');
+  await wait(text('允许外部工具访问')); await submit(); await close();
   await wait(`fixture.calls.some(([c,p])=>c==='set_agent_access'&&p.vaultId==='unit-v'&&p.access==='read')`);
   await wait(text('发现版本 0.3.23'));
   assert.ok(await get(`fixture.calls.some(([c])=>c==='check_update')`));
   await click(action('install-update')); await wait(text('安装 Vaulta 0.3.23')); await click('#modal .dialog-actions ' + action('close-dialog')); await close();
   assert.ok(await get(`!fixture.calls.some(([c])=>c==='install_update')`));
   await click('.agent-docs summary'); await shot('05-agent-settings');
+  // A settings row with two peer buttons is a Cluster: GlassDesign's 8px row gap,
+  // not two controls rendered flush against each other.
+  assert.equal(await get(`(() => { const row = [...document.querySelectorAll('.setting')].find(r => r.textContent.includes('短片项目')); const cs = getComputedStyle(row.querySelector('.setting-control')); return cs.display + '|' + cs.columnGap; })()`), 'flex|8px');
+  assert.ok(await get(`[...document.querySelectorAll('.setting-control')].every(el => parseFloat(getComputedStyle(el).columnGap) > 0)`));
   await get(`__TAURI__.core.invoke('set_agent_access',{vaultId:'unit-v',access:'off'}); fixture.emit('vaulta-changed','')`);
-  await wait(`document.querySelector('select[data-setting=agent]').value==='off'`);
+  await wait(`document.querySelector('.c-select button[aria-label="外部工具访问"]').textContent.trim()==='关闭'`);
   assert.equal(await get(`document.querySelector('.agent-docs').open`),true);
   await get('fixture.second()');
   await click('#query-scope [data-gd-widget=menu] button'); await clickText('.c-menu[data-state=open] .c-menu__item', '全部仓库'); await set('#query','界面方案'); await wait(`document.querySelectorAll('.tile').length===2`); await shot('06-cross-vault-search');
@@ -385,9 +412,9 @@ try {
   await clickText('.c-menu[data-state=open] .c-menu__item', '设计素材');
   await click(action('nav','all')); await toolChoice('重复文件'); await wait(text('重复组 1')); await click(segment('layout','list'));
   await click('thead [data-select-all]'); await wait(text('已选 2 项'));
-  // The 14px checkbox must sit inside its 34px cell, not under the name column.
+  // The 17px checkbox must sit inside its 28px cell, not under the name column.
   assert.deepEqual(await get(`(()=>{const b=document.querySelector('.asset-row .col-check input'), c=b.closest('td'), br=b.getBoundingClientRect(), cr=c.getBoundingClientRect(), s=getComputedStyle(c);
-    return { inside: br.left >= cr.left && br.right <= cr.right, size: Math.round(br.width), content: Math.round(cr.width - parseFloat(s.paddingLeft) - parseFloat(s.paddingRight)) };})()`), { inside: true, size: 14, content: 24 }); await click(action('move')); await wait(text('移动到仓库外')); await submit(); await close();
+    return { inside: br.left >= cr.left && br.right <= cr.right, size: Math.round(br.width), content: Math.round(cr.width - parseFloat(s.paddingLeft) - parseFloat(s.paddingRight)) };})()`), { inside: true, size: 17, content: 28 }); await click(action('move')); await wait(text('移动到仓库外')); await submit(); await close();
   await wait(text('1 项成功，1 项未确认完成'));
   assert.equal(await get(`fixture.calls.filter(([c,p])=>c==='file_operation'&&p.operation==='move'&&p.confirmed===true).length`),2);
   await click(action('nav','all')); await click(action('filters')); await set('#modal select[name=type]', 'image'); await submit(); await close();
@@ -443,10 +470,10 @@ try {
   await cdp('Emulation.setDeviceMetricsOverride', { width: 900, height: 570, deviceScaleFactor: 1, mobile: false });
   await get(`document.querySelector('#stage').scrollTop=480`); await pause(320);
   assert.equal(await get(`getComputedStyle(document.querySelector('#topveil')).opacity`), '1');
-  assert.equal(await get(`getComputedStyle(document.querySelector('.asset-stage')).paddingLeft`), '0px');
-  // The stage is full-bleed, but its content keeps the shared inner gutter.
-  assert.ok(parseFloat(await get(`getComputedStyle(document.querySelector('.asset-intro')).paddingLeft`)) >= 16);
-  assert.ok(parseFloat(await get(`getComputedStyle(document.querySelector('.asset-toolbar')).paddingLeft`)) >= 16);
+  // The stage owns one gutter for the whole page; children do not re-add it.
+  assert.ok(parseFloat(await get(`getComputedStyle(document.querySelector('.asset-stage')).paddingLeft`)) >= 16);
+  assert.equal(await get(`getComputedStyle(document.querySelector('.asset-intro')).paddingLeft`), '0px');
+  assert.equal(await get(`getComputedStyle(document.querySelector('.asset-toolbar')).paddingLeft`), '0px');
   // The table header scrolls with its rows: only the floating topbar keeps a
   // progressive blur, and no solid band parks underneath it.
   assert.deepEqual(await get(`(()=>{const stage=document.querySelector('#stage'), th=document.querySelector('thead th'), r=th.getBoundingClientRect(), s=stage.getBoundingClientRect();
@@ -509,9 +536,21 @@ try {
   await click(action('nav','settings'));
   await click('.c-select button[aria-label="配色方案"]'); await clickText('.c-menu[data-state=open] .c-menu__item', '浅色'); await wait(`document.documentElement.dataset.theme === 'light'`); await shot('08-light');
   await click('.c-select button[aria-label="配色方案"]'); await clickText('.c-menu[data-state=open] .c-menu__item', '深色'); await wait(`document.documentElement.dataset.theme === 'dark'`); await shot('08-dark');
-  await set('select[data-setting=doc-preview]', 'paged');
+  // The three GlassDesign tiers write one attribute and persist the library's
+  // own preference key; no component is rebuilt.
+  await click('.c-select button[aria-label="玻璃效果"]'); await clickText('.c-menu[data-state=open] .c-menu__item', '性能优先');
+  await wait(`document.documentElement.getAttribute('data-gd-effects') === 'solid'`);
+  assert.equal(await get(`localStorage.getItem('glass-design:effects')`), 'solid');
+  assert.equal(await get(`getComputedStyle(document.querySelector('.vault-glass .c-capsule')).backdropFilter`), 'none');
+  await click('.c-select button[aria-label="玻璃效果"]'); await clickText('.c-menu[data-state=open] .c-menu__item', '仅模糊');
+  await wait(`document.documentElement.getAttribute('data-gd-effects') === 'blur'`);
+  assert.doesNotMatch(await get(`getComputedStyle(document.querySelector('#rail-toggle-slot .c-capsule--round')).backdropFilter`), /url\(/);
+  await click('.c-select button[aria-label="玻璃效果"]'); await clickText('.c-menu[data-state=open] .c-menu__item', '完整效果');
+  await wait(`!document.documentElement.hasAttribute('data-gd-effects')`);
+  assert.equal(await get(`localStorage.getItem('glass-design:effects')`), 'auto');
+  await click('.c-select button[aria-label="多页文档预览"]'); await clickText('.c-menu[data-state=open] .c-menu__item', '单页翻页');
   assert.equal(await get(`JSON.parse(localStorage.getItem('vaulta.doc-preview'))`), 'paged');
-  await set('select[data-setting=doc-preview]', 'flow');
+  await click('.c-select button[aria-label="多页文档预览"]'); await clickText('.c-menu[data-state=open] .c-menu__item', '竖直流动');
   assert.equal(await get(`JSON.parse(localStorage.getItem('vaulta.doc-preview'))`), 'flow');
   await cdp('Emulation.setEmulatedMedia', { features: [{ name:'prefers-reduced-motion',value:'reduce' }] });
   await click(action('nav','all')); await click(segment('library-mode','flags')); await wait(exists('.library-segments .c-seg__ind'));
@@ -519,8 +558,14 @@ try {
   await wait(`document.querySelector('.library-segments .c-seg').dataset.value==='all'`);
   assert.ok(await get(`matchMedia('(prefers-reduced-motion: reduce)').matches && parseFloat(getComputedStyle(document.querySelector('.library-segments .c-seg__ind')).transitionDuration) < 0.001`));
   assert.equal(await get(`document.documentElement.dataset.gdError ?? ''`), '');
+  await get(`vaultaEffects.save('solid')`);
   await cdp('Page.reload');
-  await wait(`document.querySelector('#rail').offsetWidth === ${width + grow - 8} && document.querySelector('#rail-grip [role=separator]')`);
+  await wait(`document.querySelector('#rail')?.offsetWidth === ${width + grow - 8} && document.querySelector('#rail-grip [role=separator]')`);
+  // The head script restores the saved tier before the first style pass.
+  await wait(exists('.vault-glass .c-capsule'));
+  assert.equal(await get(`document.documentElement.getAttribute('data-gd-effects')`), 'solid');
+  assert.equal(await get(`getComputedStyle(document.querySelector('.vault-glass .c-capsule')).backdropFilter`), 'none');
+  await get(`vaultaEffects.save('auto')`);
   assert.deepEqual(errors, []); assert.deepEqual(logs, []);
   console.log(`Edge smoke passed. Screenshots: ${temp}`);
 } finally { ws.close(); edge.kill(); server.close(); }

@@ -1,6 +1,6 @@
 import { widget } from './glass.js';
 import { glyphs } from './vendor/glassdesign/icons.js';
-import { arr, assetKey, assetType, formatBytes, formatDate, isDir, pathKey, systemState, markable } from './model.js';
+import { arr, assetKey, assetType, extension, formatBytes, formatDate, isDir, pathKey, systemState, markable, thumbKey, thumbnailable } from './model.js';
 
 const extra = {
   inbox: '<path d="M4 4h16l2 10v5a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-5z"/><path d="M2 14h6l2 3h4l2-3h6"/>',
@@ -45,12 +45,16 @@ export function segmented(label, options, selected, action, className = '') {
     `<button type="button" ${act(action, value)} aria-pressed="${value === selected}">${glyph ? icon(glyph, 15) : ''}${esc(text)}</button>`).join('')}</div>`;
   return widget('segmented', { label, options: options.map(([value, label, icon]) => ({ value, label, icon })), value: selected }, { key: action, action, className, fallback });
 }
-export function themeSelect(values, selected) {
-  return widget('select', { label: '配色方案', width: 148, options: values.map(([value, label]) => ({ value, label })), value: selected },
-    { action: 'set-theme', fallback: select('theme', values, selected, 'data-setting="theme"') });
+// A settings dropdown is the library's Select: the same `.c-btn` trigger shell
+// as every other control, and a `.c-menu` panel instead of the OS picker. The
+// native <select> stays as the fallback when the wasm runtime is unavailable,
+// which is why it keeps the `data-setting` hand-off.
+export function settingSelect({ label, options, value, action, setting, width = 180 }) {
+  return widget('select', { label, width, options: options.map(([id, text]) => ({ value: id, label: text })), value },
+    { key: action, action, fallback: select(setting, options, value, `aria-label="${esc(label)}" data-setting="${esc(setting)}"`) });
 }
-export function inlineNotice(tone, message) {
-  return widget('inline-message', { tone, message }, { className: 'notice-message', fallback: `<span>${esc(message)}</span>` });
+export function inlineNotice(tone, message, title = '') {
+  return widget('inline-message', { tone, message, ...(title ? { title } : {}) }, { className: 'notice-message', fallback: `<span>${esc(message)}</span>` });
 }
 export const pill = (label, tone = '') => `<span class="pill ${tone}">${esc(label)}</span>`;
 export const visual = (item, style = '') => { const t = assetType(item); return `<span class="file-visual ${t.tone} ${style}">${icon(t.icon, 21)}</span>`; };
@@ -88,8 +92,13 @@ export function assetCard(row, selected, cross, source) {
   // how big it is, then where it lives and when it changed.
   const facts = [type.name, folder ? (row.count ? `${row.count} 项` : '') : formatBytes(item.size)].filter(Boolean).join(' · ');
   const foot = [cross ? source : '', row.trail || '', item.modified ? formatDate(item.modified) : ''].filter(Boolean).join(' · ');
+  // A real thumbnail is the point of the grid; the type glyph stays underneath
+  // as the loading and no-preview state.
+  const thumb = thumbnailable(item)
+    ? `<img class="tile-thumb" alt="" draggable="false" decoding="async" data-thumb-fit="${extension(item) === 'svg' ? 'contain' : 'cover'}" data-thumb="${esc(thumbKey(item))}" data-thumb-vault="${esc(item.vaultId)}" data-thumb-asset="${esc(item.id)}">`
+    : '';
   return `<div class="tile ${mark ? 'selected' : ''} ${folder ? 'is-folder' : ''}" data-asset="${esc(key)}" tabindex="0" role="group" aria-label="${esc(item.name)}"${dragAttrs(item)}${dropAttrs(item)}>
-    <div class="tile-art ${type.tone}">${visual(item, 'large')}${item.synthetic ? '' : itemCheck(item, mark)}${ib('资产操作', 'asset-menu', 'more', { value: key, style: 'tile-more' })}${row.tree && folder && row.hasChildren ? `<button type="button" class="tile-tree ${row.open ? 'open' : ''}" ${act('tree-toggle', pathKey(item.rel))} aria-expanded="${row.open}" aria-label="${row.open ? '收起文件夹' : '展开文件夹'}">${icon('chevron-right', 15)}</button>` : ''}</div>
+    <div class="tile-art ${type.tone}${thumb ? ' has-thumb' : ''}">${visual(item, 'large')}${thumb}${item.synthetic ? '' : itemCheck(item, mark)}${ib('资产操作', 'asset-menu', 'more', { value: key, style: 'tile-more' })}${row.tree && folder && row.hasChildren ? `<button type="button" class="tile-tree ${row.open ? 'open' : ''}" ${act('tree-toggle', pathKey(item.rel))} aria-expanded="${row.open}" aria-label="${row.open ? '收起文件夹' : '展开文件夹'}">${icon('chevron-right', 15)}</button>` : ''}</div>
     <div class="tile-title" title="${esc(item.name)}">${esc(item.name)}</div>
     <div class="tile-meta" title="${esc(item.rel)}"><span class="ellipsis">${esc(facts)}</span></div>
     <div class="tile-meta tile-foot"><span class="ellipsis">${esc(foot)}</span>${markControl(item, false)}</div>
@@ -115,4 +124,4 @@ export function assetRow(row, selected, cross, source, marking = false) {
     <td class="col-more"><div class="row-actions">${marking ? '' : markControl(item, false)}${ib('资产操作', 'asset-menu', 'more', { value: key })}</div></td>
   </tr>`;
 }
-export const lines = entries => arr(entries).map(entry => `<div class="event-row"><span class="event-icon">${icon('clock', 16)}</span><div><strong>${esc(entry.message)}</strong><small>${esc(entry.source || 'vaulta')}</small></div><time>${esc(formatDate(entry.time, true))}</time></div>`).join('');
+export const lines = entries => arr(entries).map(entry => `<div class="event-row"><span class="event-icon">${icon('clock', 16)}</span><div><strong>${esc(entry.message)}</strong><small>${esc(entry.source || 'Vaulta')}</small></div><time>${esc(formatDate(entry.time, true))}</time></div>`).join('');

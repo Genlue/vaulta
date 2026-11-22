@@ -78,13 +78,13 @@ try {
     }
 
     $dist = Join-Path $root 'dist'
-    $portableName = "vaulta-$Version-windows-x64"
+    $portableName = "Vaulta-$Version-windows-x64"
     $portable = Join-Path $dist $portableName
     New-Item -ItemType Directory -Force $portable | Out-Null
     foreach ($file in 'vaulta.exe','vaulta-agent.exe') {
         Copy-Item -LiteralPath (Join-Path $root "target/release/$file") -Destination $portable
     }
-    Get-ChildItem -LiteralPath (Join-Path $root 'target/release/bundle/nsis') -Filter "vaulta_${Version}_*-setup.exe" -File |
+    Get-ChildItem -LiteralPath (Join-Path $root 'target/release/bundle/nsis') -Filter "Vaulta_${Version}_*-setup.exe" -File |
         ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $dist }
     # ZipFile writes no progress records, so CI logs stay free of archive chatter.
     $zip = Join-Path $dist "$portableName.zip"

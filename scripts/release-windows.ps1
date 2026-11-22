@@ -7,7 +7,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-$repository = 'Genlue/vaulta'
+$repository = 'Genlue/Vaulta'
 Push-Location -LiteralPath $root
 try {
     $config = Get-Content -LiteralPath 'src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json
@@ -16,10 +16,10 @@ try {
         throw "Expected a stable version in tauri.conf.json, not '$version'."
     }
     $tag = "v$version"
-    $installerName = "vaulta_${version}_x64-setup.exe"
+    $installerName = "Vaulta_${version}_x64-setup.exe"
     $dist = Join-Path $root 'dist'
     $installer = Join-Path $dist $installerName
-    $portable = Join-Path $dist "vaulta-$version-windows-x64.zip"
+    $portable = Join-Path $dist "Vaulta-$version-windows-x64.zip"
     $manifest = Join-Path $dist 'latest.json'
     if ($Publish) {
         # Build and release exactly the version already reviewed and pushed to main.

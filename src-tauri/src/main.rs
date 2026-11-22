@@ -2,6 +2,7 @@
 
 mod document_preview;
 mod ops;
+mod thumbnails;
 mod updates;
 mod watcher;
 mod window_chrome;
@@ -29,6 +30,7 @@ struct Desktop {
     wake: Sender<watcher::Wake>,
     app_revision: Arc<AtomicI64>,
     search_gen: Arc<AtomicU64>,
+    thumbs: thumbnails::Thumbs,
 }
 
 fn mark_revision(slot: &AtomicI64, core: &Core) {
@@ -257,6 +259,38 @@ async fn preview(
 }
 
 #[tauri::command]
+async fn thumbnail(
+    state: State<'_, Desktop>,
+    vault_id: String,
+    asset_id: String,
+) -> Reply<String> {
+    let (root, asset) = inspect(&state, {
+        let id = vault_id.clone();
+        move |core| checked_asset(core, &id, &asset_id)
+    })
+    .await?;
+    let path = disk::resolve(&root, &asset.path).map_err(|error| format!("{error:#}"))?;
+    // The cache key follows the same identity the inspector verifies, plus the
+    // file's last write and size so a rescan or in-place edit cannot reuse pixels.
+    let key = format!(
+        "{vault_id}\u{0}{}\u{0}{}\u{0}{}\u{0}{}",
+        asset.id,
+        asset.identity.as_deref().unwrap_or_default(),
+        asset.modified,
+        asset.size
+    );
+    let cache = state.thumbs.clone();
+    blocking(move || {
+        ensure!(
+            vaulta_core::identity(&path)? == asset.identity,
+            "读取期间文件已更换，请重新扫描。"
+        );
+        thumbnails::load(&cache, &key, &path, &asset.path)
+    })
+    .await
+}
+
+#[tauri::command]
 async fn save_text(
     app: AppHandle,
     state: State<'_, Desktop>,
@@ -318,7 +352,7 @@ async fn file_operation(
         };
         if let Some(message) = requires_consent {
             ensure!(confirmed.unwrap_or(false), "这项操作需要明确确认。");
-            let yes = app.dialog().message(message).title("vaulta · 确认真实文件操作")
+            let yes = app.dialog().message(message).title("Vaulta · 确认真实文件操作")
                 .kind(MessageDialogKind::Warning)
                 .buttons(MessageDialogButtons::YesNo).blocking_show();
             ensure!(yes, "操作已取消。");
@@ -594,6 +628,7 @@ fn main() {
                 wake,
                 app_revision,
                 search_gen: Arc::new(AtomicU64::new(0)),
+                thumbs: thumbnails::Thumbs::new(),
             });
             window_chrome::open(app, &db)?;
             Ok(())
@@ -610,6 +645,7 @@ fn main() {
             rescan,
             mutate,
             preview,
+            thumbnail,
             document_preview::pdf_preview_page,
             document_preview::slides_preview_page,
             document_preview::office_preview_open,
@@ -631,7 +667,7 @@ fn main() {
         ])
         .run(tauri::generate_context!());
     if let Err(err) = result {
-        eprintln!("vaulta: {err}");
+        eprintln!("Vaulta: {err}");
         std::process::exit(1);
     }
 }
